@@ -6,6 +6,7 @@ Cập nhật: 27/10/2026, Asia/Ho_Chi_Minh. Đọc cùng BACKLOG.md, SOURCE-CONT
 
 - Fork: https://github.com/namese1994/crm, branch `codex/customer-care`.
 - Baseline upstream main: `711c909cf016e738c5b2e9418310485ad67bee47`.
+- Commit triển khai cục bộ: `f81fab7` (49 file của CRM); chưa push remote hoặc mở PR.
 - Windows: `\\100.104.251.126\Documents\AI_Workspace\apps\crm` (alias cũ Y:\AI_Workspace\apps\crm).
 - Linux cùng file: `/workspace/apps/crm`, qua nam-mcp workspace runner, container phát triển.
 - Không sửa gstack/n8n hoặc logic/bảng size. Không gửi tin khách. Không xóa thay đổi ngoài phạm vi.
@@ -38,7 +39,7 @@ Cập nhật: 27/10/2026, Asia/Ho_Chi_Minh. Đọc cùng BACKLOG.md, SOURCE-CONT
 
 1. Kiểm tra độ trôi phân trang và cân nhắc đối soát định kỳ; nguồn runtime vẫn chưa có credentials trong app. Không sửa cursor/claim của hệ thống n8n hiện tại.
 2. Chuẩn bị đồng bộ branch đã kiểm thử lên fork để review, theo quy trình ship của repo; chưa push hoặc mở PR tại checkpoint này.
-3. Đã chuẩn bị lưu commit riêng file CRM. `git diff --numstat` phản ánh thay đổi thực, còn `git status` có thể liệt kê file không đổi vì mount/CRLF. Không `add -A`, restore/reset toàn repo; không đưa `.env`, cookie, ảnh/log thử nghiệm hoặc dữ liệu khách thật lên Git.
+3. Code đã lưu commit riêng file CRM. `git diff --numstat` phản ánh thay đổi thực, còn `git status` có thể liệt kê file không đổi vì mount/CRLF. Không `add -A`, restore/reset toàn repo; không đưa `.env`, cookie, ảnh/log thử nghiệm hoặc dữ liệu khách thật lên Git. Hai migration đã áp dụng có dòng trắng cuối file; tránh sửa checksum chỉ để dọn whitespace trong các database test đã tạo.
 4. Khi có cấu hình server/auth/token nguồn và chính sách đã duyệt: chứng nhận sync trực tiếp, triển khai HTTPS, đăng nhập ba nhân viên, chọn rõ 50–100 khách pilot; không mặc nhiên enroll khách thật.
 5. Quan sát pilot khoảng hai tuần với Android thật rồi mới nghiệm thu D03.
 

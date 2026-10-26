@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { AUTH_COOKIE_PREFIX } from "@crm/auth/cookies";
 import { NextRequest } from "next/server";
 import { readResearchGate, readWorkspaceGate } from "../lib/onboarding";
@@ -11,10 +11,17 @@ const SLUG = "comp-ai";
 const realFetch = globalThis.fetch;
 
 const realMarketing = process.env.IS_MARKETING;
+const realCareMode = process.env.CRM_CARE_MODE;
+
+beforeEach(() => {
+	process.env.CRM_CARE_MODE = "false";
+});
 
 afterEach(() => {
 	globalThis.fetch = realFetch;
 	marketing(realMarketing);
+	if (realCareMode === undefined) delete process.env.CRM_CARE_MODE;
+	else process.env.CRM_CARE_MODE = realCareMode;
 });
 
 function marketing(value: string | undefined) {
@@ -84,6 +91,28 @@ function request(pathname: string, cookies: string[] = []) {
 		headers: cookies.length ? { cookie: cookies.join("; ") } : {},
 	});
 }
+
+describe("care mode gate", () => {
+	it("opens care without requiring a research key", async () => {
+		process.env.CRM_CARE_MODE = "true";
+		const calls = setup({ configured: false });
+		expect(redirectedTo(await proxy(request("/", [SESSION_COOKIE])))).toBe(
+			`/${SLUG}/care`,
+		);
+		expect(calls.research).toBe(0);
+	});
+
+	it("keeps authentication and workspace onboarding", async () => {
+		process.env.CRM_CARE_MODE = "true";
+		setup({ onboarded: false });
+		expect(redirectedTo(await proxy(request(`/${SLUG}/care`)))).toBe(
+			"/sign-in",
+		);
+		expect(
+			redirectedTo(await proxy(request(`/${SLUG}/care`, [SESSION_COOKIE]))),
+		).toBe("/onboarding");
+	});
+});
 
 function redirectedTo(response: Response): string | null {
 	const location = response.headers.get("location");

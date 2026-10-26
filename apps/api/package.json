@@ -9,6 +9,8 @@
 	},
 	"scripts": {
 		"build": "bun build src/main.ts --target=bun --outdir dist --packages=external --sourcemap",
+		"care:worker": "bun ../../tools/customer-care/worker.ts",
+		"care:test": "CRM_TELEMETRY_DISABLED=1 bun test test/customer-care.integration.spec.ts ../../packages/validation/test/customer-care.spec.ts ../../tools/customer-care/source-sync.spec.ts",
 		"check-types": "tsc --noEmit",
 		"dev": "concurrently -n api,trpc -c blue,magenta \"bun --watch src/main.ts\" \"bun run dev:trpc\"",
 		"dev:trpc": "nestjs-trpc watch -e src/app.module.ts -r \"**/*.router.ts\" -o src/generated",

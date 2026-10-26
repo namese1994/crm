@@ -1,0 +1,50 @@
+# Chạy CRM bằng PM2
+
+Requires Bun 1.4.0, Node >=22, PM2 and Postgres. Bun 1.3 cannot read this upstream lockfile. Keep the repository-root `.env`; no package-level env files.
+
+The upstream tRPC codegen binary requires GLIBC 2.39 on Linux. Build on a compatible environment (for example Ubuntu 24.04) or use a separate compatible code-generation environment. The development container's GLIBC 2.36 workaround and exact validation limits are recorded in `VALIDATION.md`.
+
+## Build
+
+```sh
+bun install --frozen-lockfile
+bun run --filter=@crm/db db:generate
+bun run --filter=api build
+bun run --filter=@crm/care-worker build
+bun run --filter=app build
+```
+
+Set the chosen server's DATABASE_URL, auth provider and allow-list in `.env`. Apply migrations to the intended CRM database with `bun run db:deploy` after reviewing that target. Never use the development `crm_care_test` database as production. Set CRM_CARE_MODE=true to use care without research/mailbox onboarding. This retains session authentication and manager authorization.
+
+```sh
+pm2 start ecosystem.config.cjs
+pm2 save
+pm2 status
+```
+
+Place HTTPS reverse proxy in front of web/API. Configure APP_URL, API_URL, OAuth callback and cookie scope for the real hostname. Clipboard access requires HTTPS on Android. The UI also exposes selectable text when clipboard access fails.
+
+CRM_WEB_PORT and CRM_BUN_BIN override PM2's web port and Bun executable. Export them in the launch shell. Postgres stays an independent service. The care worker uses one process and database locks; no AI call is required to schedule or compose a template.
+
+## Source verification
+
+Read `SOURCE-CONTRACTS.md`. The direct source adapter is not yet live-certified. Source credentials are optional. Missing credentials disable source pulls. No API key, token or URL query is logged.
+
+Do not set `activityVerifiedAt` from `conversation.updated_at`. Tag edits can change that field. The adapter reads actual messages using the official v1 endpoint and validates page/conversation/customer IDs before recording activity verification. The official conversation list uses v2 with `last_conversation_id`, not numbered pages. The native wrapper's documented v2 message route returned HTML; this was traced to the version mismatch using the official OpenAPI specification. Both brand pages were confirmed through live GET-only POS shop metadata. Direct authenticated runtime sync still needs certification.
+
+The source watermark advances only after every requested page imports successfully. Errors and pagination limits retain the watermark. Polling has a two-day overlap and an initial 120-day window; it is not proof of full customer purchase history. Daily full reconciliation and live pagination drift tests remain acceptance work. Do not report first-ever purchase or revenue attribution from that partial window.
+
+Enrolled customers with source context older than ten minutes are refreshed separately by exact POS customer ID, oldest first, at most 100 per channel/cycle. This reads their newest brand order and actual conversation activity even when that order lies outside the incremental window. A scope mismatch fails the cycle. The source lease is renewed during pagination/refresh and a lost lease stops that worker. This does not certify source availability or complete historical purchase coverage.
+
+Keep demo and automated tests in separate databases. The synthetic helper uses DATABASE_URL; the test runner uses TEST_DATABASE_URL. Do not point the full suite at a populated demo database: the upstream membership tests require an empty workspace and deliberately refuse to delete foreign members. Do not clear those rows merely to make tests pass.
+
+## Pilot
+
+1. Verify actual source identity, delivery history and message activity.
+2. Configure employee sign-in and manager roles.
+3. Approve the business policy and template versions.
+4. Review eligible candidates and explicitly enroll 50–100.
+5. Observe employee use on real Android devices for approximately two weeks.
+6. Reconcile manual confirmations against platform history where available.
+
+Code tests and a synthetic browser walkthrough do not complete the real pilot. Keep the heartbeat active until D03 has observed evidence.

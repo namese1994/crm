@@ -41,7 +41,10 @@ if (env.google) {
 	const google: NonNullable<typeof socialProviders.google> = {
 		...env.google,
 
-		scope: [...SYNC_SCOPES],
+		scope:
+			process.env.CRM_CARE_MODE === "true"
+				? ["openid", "email", "profile"]
+				: [...SYNC_SCOPES],
 
 		accessType: "offline",
 	};
@@ -58,7 +61,10 @@ if (env.microsoft) {
 		clientSecret: env.microsoft.clientSecret,
 		tenantId: env.microsoft.tenantId,
 
-		scope: [...MICROSOFT_SYNC_SCOPES],
+		scope:
+			process.env.CRM_CARE_MODE === "true"
+				? ["openid", "profile", "email", "User.Read"]
+				: [...MICROSOFT_SYNC_SCOPES],
 
 		prompt: "select_account",
 

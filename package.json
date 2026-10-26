@@ -54,6 +54,7 @@
 	},
 	"workspaces": [
 		"apps/*",
-		"packages/*"
+		"packages/*",
+		"tools/customer-care"
 	]
 }

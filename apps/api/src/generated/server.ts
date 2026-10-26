@@ -20,6 +20,7 @@ import { companyListInput, companyListOutput, companyIdInput, companyDetailOutpu
 import { contactListInput, contactListOutput, contactIdInput, contactByIdOutput, contactCreateInput, contactBasicOutput, contactUpdateArgs, contactNameOutput, contactEnrichOutput, contactBulkOwnerInput, bulkResultOutput, contactBulkCompanyInput, contactBulkInput, factDecisionInput, decideFactOutput } from "../contacts/contacts.contracts";
 import { conversationListInput, conversationListOutput, builderListOutput, builderResourceSearchInput, builderResourcesOutput, conversationIdInput, builderConversationDetailOutput, conversationEventsInput, conversationEventsOutput, conversationSaveInput, conversationIdOutput, builderConversationCreateInput, builderConversationSubmitInput, builderQuestionResponseInput, builderApprovalResponseInput, builderSessionLimitResponseInput, builderPermissionModeInput, builderResponseRatingInput, builderResponseRatingOutput, conversationShareStatusOutput, conversationShareTokenOutput, sharedConversationInput, sharedConversationOutput } from "../conversations/conversations.contracts";
 import { currencySettingsOutput, setReportingCurrencyInput, setManualRateInput, removeManualRateInput } from "../currency/currency.contracts";
+import { careListInput, careMetrics, careBrand, careCustomerInput, careTaskInput, careActionInput, careTemplateInput, careImport } from "@crm/validation/customer-care";
 import { dashboardSummaryInput, dashboardSummaryOutput } from "../dashboard/dashboard.contracts";
 import { dealListInput, dealListOutput, dealIdInput, dealDetailOutput, dealCreateInput, dealCreateOutput, dealUpdateArgs, dealMutateOutput, setStageInput, dealSetStageOutput, dealContactsInput, dealContactOptionsOutput, dealAttachContactInput, dealContactLinkOutput, dealDetachContactInput, dealContactRoleInput, dealContactRoleOutput, dealBulkOwnerInput, dealBulkResultOutput, dealBulkStageInput, dealBulkInput } from "../deals/deals.contracts";
 import { enrichmentQueueInput } from "@crm/validation/enrichment-queue";
@@ -33,6 +34,7 @@ import { slackStatusOutput, slackMatchesOutput, slackChannelsInput, slackChannel
 import { ssoSignInOptionsOutput, ssoSettingsOutput, ssoProviderListInput, ssoProviderListOutput, registerSsoProviderInput, ssoProviderOutput, deleteSsoProviderInput, deleteSsoProviderOutput } from "../sso/sso.contracts";
 import { trackingSettingsOutput, trackingFlagInput, cookieLifetimeInput, addDomainInput, trackedDomainOutput, removeDomainInput, rotateSiteIdOutput, verifyInput, verifyOutput, sourcesOutput, companyActivityInput, websiteActivityOutput, contactActivityInput } from "../tracking/tracking.contracts";
 import { workspaceOutput, memberListInput, memberListOutput, updateWorkspaceInput, setMemberRoleInput, workspaceMemberOutput } from "../workspace/workspace.contracts";
+import type { CustomerCareRouter } from "../customer-care/customer-care.router";
 import type { UsersRouter } from "../users/users.router";
 
 const appRouter = t.router({
@@ -377,6 +379,48 @@ const appRouter = t.router({
     refreshRates: publicProcedure
       .output(currencySettingsOutput)
       .mutation(async () => "PLACEHOLDER_DO_NOT_REMOVE" as any)
+    }),
+  care: t.router({
+    list: publicProcedure
+      .input(careListInput)
+      .query(async () => "PLACEHOLDER_DO_NOT_REMOVE" as unknown as Awaited<ReturnType<CustomerCareRouter["list"]>>),
+    summary: publicProcedure
+      .query(async () => "PLACEHOLDER_DO_NOT_REMOVE" as unknown as Awaited<ReturnType<CustomerCareRouter["summary"]>>),
+    metrics: publicProcedure
+      .output(careMetrics)
+      .query(async () => "PLACEHOLDER_DO_NOT_REMOVE" as any),
+    customers: publicProcedure
+      .input(z.object({
+			brand: careBrand.optional(),
+			page: z.number().int().min(1).default(1),
+		}))
+      .query(async () => "PLACEHOLDER_DO_NOT_REMOVE" as unknown as Awaited<ReturnType<CustomerCareRouter["customers"]>>),
+    configureCustomer: publicProcedure
+      .input(careCustomerInput)
+      .mutation(async () => "PLACEHOLDER_DO_NOT_REMOVE" as unknown as Awaited<ReturnType<CustomerCareRouter["configureCustomer"]>>),
+    claim: publicProcedure
+      .input(careTaskInput)
+      .mutation(async () => "PLACEHOLDER_DO_NOT_REMOVE" as unknown as Awaited<ReturnType<CustomerCareRouter["claim"]>>),
+    copy: publicProcedure
+      .input(careTaskInput)
+      .mutation(async () => "PLACEHOLDER_DO_NOT_REMOVE" as unknown as Awaited<ReturnType<CustomerCareRouter["copy"]>>),
+    action: publicProcedure
+      .input(careActionInput)
+      .mutation(async () => "PLACEHOLDER_DO_NOT_REMOVE" as unknown as Awaited<ReturnType<CustomerCareRouter["action"]>>),
+    templates: publicProcedure
+      .input(z.object({ brand: careBrand.optional() }))
+      .query(async () => "PLACEHOLDER_DO_NOT_REMOVE" as unknown as Awaited<ReturnType<CustomerCareRouter["templates"]>>),
+    saveTemplate: publicProcedure
+      .input(careTemplateInput)
+      .mutation(async () => "PLACEHOLDER_DO_NOT_REMOVE" as unknown as Awaited<ReturnType<CustomerCareRouter["saveTemplate"]>>),
+    approveTemplate: publicProcedure
+      .input(z.object({ id: z.string().min(1), approved: z.boolean() }))
+      .mutation(async () => "PLACEHOLDER_DO_NOT_REMOVE" as unknown as Awaited<ReturnType<CustomerCareRouter["approveTemplate"]>>),
+    importOrder: publicProcedure
+      .input(careImport)
+      .mutation(async () => "PLACEHOLDER_DO_NOT_REMOVE" as unknown as Awaited<ReturnType<CustomerCareRouter["importOrder"]>>),
+    reconcile: publicProcedure
+      .mutation(async () => "PLACEHOLDER_DO_NOT_REMOVE" as unknown as Awaited<ReturnType<CustomerCareRouter["reconcile"]>>)
     }),
   dashboard: t.router({
     summary: publicProcedure

@@ -3,6 +3,10 @@
 	"ui": "tui",
 	"globalEnv": ["NODE_ENV"],
 	"globalPassThroughEnv": [
+		"CRM_CARE_MODE",
+		"CARE_CHANNELS_JSON",
+		"CARE_POS_API_KEY",
+		"CARE_PANCAKE_TOKENS_JSON",
 		"DATABASE_URL",
 		"DATABASE_URL_UNPOOLED",
 		"TEST_DATABASE_URL",

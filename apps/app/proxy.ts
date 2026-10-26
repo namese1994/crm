@@ -18,7 +18,14 @@ const UNGATED = ["/grant-access", "/eve"];
 
 const ANONYMOUS = ["/t"];
 
-const SECTIONS = ["/companies", "/contacts", "/deals", "/tasks", "/settings"];
+const SECTIONS = [
+	"/companies",
+	"/contacts",
+	"/deals",
+	"/tasks",
+	"/settings",
+	"/care",
+];
 
 export async function proxy(request: NextRequest) {
 	const { pathname } = request.nextUrl;
@@ -41,7 +48,9 @@ export async function proxy(request: NextRequest) {
 	// trip rather than two, and neither answer can be stale.
 	const [workspace, research] = await Promise.all([
 		readWorkspaceGate(request),
-		readResearchGate(request),
+		process.env.CRM_CARE_MODE === "true"
+			? Promise.resolve("settled" as const)
+			: readResearchGate(request),
 	]);
 
 	if (workspace.gate === "required") return sendTo(ONBOARDING_PATH, request);
@@ -56,7 +65,10 @@ export async function proxy(request: NextRequest) {
 
 function appPath(pathname: string, slug: string): string {
 	if (pathname === LANDING_PATH || isSetup(pathname)) {
-		return workspaceUrl(slug);
+		return workspaceUrl(
+			slug,
+			process.env.CRM_CARE_MODE === "true" ? "/care" : "/",
+		);
 	}
 
 	if (SECTIONS.some((section) => isUnder(pathname, section))) {

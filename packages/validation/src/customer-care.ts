@@ -118,7 +118,7 @@ const instant = z.iso.datetime({ offset: true });
 export const careProducts = z
 	.array(
 		z.object({
-			sku: z.string().min(1).max(160),
+			sku: z.string().min(1).max(160).nullable(),
 			name: z.string().min(1).max(300),
 			quantity: z.number().int().positive(),
 		}),

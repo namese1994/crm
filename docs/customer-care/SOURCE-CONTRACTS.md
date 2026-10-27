@@ -4,6 +4,10 @@
 
 Brand + POS shop ID + POS customer ID identify a care customer. Never merge on name. Store the exact POS name and exact SKU strings. A conversation additionally requires the exact Pancake page ID and conversation ID. Cross-brand links need explicit evidence and do not grant cross-brand marketing permission.
 
+The live POS response can return `customer.fb_id` as `<page_id>_<customer_id>`. Match the customer suffix only when the prefix equals the configured page, and require the conversation ID to equal the complete POS value. Verify the message feed page, conversation and sender before setting activity verification. A different page prefix never matches. A missing POS SKU is stored as null; non-null SKUs remain byte-for-byte unchanged.
+
+When Pancake conversation pagination exceeds its bounded scan, or responds 429, independent POS order imports can complete while the source remains blocked. Do not advance the watermark or record a successful source scan in that case. The product UI identifies the blocked brand and cause. Exact customer events named `customers` are not order events: acknowledge new ones without enqueueing an order and mark previously pending ones `IGNORED`. Preserve already failed receipts for review.
+
 ## Delivery
 
 `deliveredAt` requires the source's actual delivery-success evidence. A status without a timestamp is insufficient for D+x. Created/updated/shipped times are not delivery times. Cancelled, returned, partially delivered or unknown orders cannot enroll a whole-order post-purchase sequence.

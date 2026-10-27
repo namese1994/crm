@@ -14,6 +14,16 @@ Cập nhật: 27/10/2026, Asia/Ho_Chi_Minh. Đọc cùng BACKLOG.md, SOURCE-CONT
 
 ## Đã triển khai và kiểm tra
 
+### Điều tra sau khi Nam cấu hình nguồn, 27/10/2026
+
+- POSCake đã được bật; lỗi nguồn, giới hạn phân trang hội thoại và 429 khiến dữ liệu ban đầu không xuất hiện. Màn workspace root cũng mở dashboard B2B thay vì care. Đã sửa đường vào care, hiển thị trạng thái nguồn, chấp nhận SKU null và giữ nguyên SKU có giá trị.
+- POS trả `fb_id` gồm page và customer ID. Đã sửa ghép theo đúng page, kiểm tra ID hội thoại và tin nhắn. Một phép đối chiếu GET-only nguồn thật khớp POS → Pancake → message feed; không ghi log ID, tin hoặc khóa.
+- Webhook thật có event `customers`; bản cũ nhầm thành đơn. Event mới được acknowledge mà không đưa vào order queue; pending cũ có loại đã biết chuyển `IGNORED` mà không gọi POS. Các receipt `FAILED` được giữ nguyên, không tự replay/reset.
+- Tại lúc kiểm tra: 494 khách, 633 đơn, 387 đơn có bằng chứng giao thành công, 12 hội thoại UMEHA đã xác minh, 0 khách enrolled, 0 template được duyệt. Đây là snapshot, không phải pilot hoặc kết quả chăm sóc khách.
+- UMEHA có lượt nguồn thành công. Li En Sport vẫn báo `PANCAKE_PAGINATION_INCOMPLETE`; đơn đã nhập nhưng chăm sóc chủ động vẫn bị chặn. 429 dùng backoff; không bỏ guard hoặc đẩy watermark khi scan chưa đầy đủ.
+- LLM phiên bản 7 đã vượt text probe, nhưng chưa bật. OpenRouter ghi model NVIDIA free này không hỗ trợ ép JSON schema và khuyến cáo không gửi dữ liệu cá nhân/mật. Chưa thử agent với dữ liệu khách thật.
+- Regression: 51 ca/134 assertions source/validation/proxy; 11 ca/66 assertions webhook/integration; typecheck 11 task, lint và anti-slop đạt. Bản web, API và worker đã build/deploy bằng PM2; heartbeat vẫn PAUSED.
+
 ### Bản hiện tại: nguồn trên app và trợ lý AI, 27/10/2026
 
 - Đã triển khai `/crm-thu-nghiem-umeha/settings/connections/poscake`, `/settings/care-ai` và `/care` → Trợ lý AI. Đường dẫn thứ hai/thứ ba cũng có workspace slug.

@@ -102,6 +102,14 @@ describe("care mode gate", () => {
 		expect(calls.research).toBe(0);
 	});
 
+	it("opens care when a signed-in user visits the workspace root", async () => {
+		process.env.CRM_CARE_MODE = "true";
+		setup({ configured: false });
+		expect(
+			redirectedTo(await proxy(request(`/${SLUG}`, [SESSION_COOKIE]))),
+		).toBe(`/${SLUG}/care`);
+	});
+
 	it("keeps authentication and workspace onboarding", async () => {
 		process.env.CRM_CARE_MODE = "true";
 		setup({ onboarded: false });

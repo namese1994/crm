@@ -77,7 +77,11 @@ function appPath(pathname: string, slug: string): string {
 
 	const [first, ...rest] = pathname.slice(1).split("/");
 
-	if (first === slug) return pathname;
+	if (first === slug) {
+		if (rest.length === 0 && process.env.CRM_CARE_MODE === "true")
+			return workspaceUrl(slug, "/care");
+		return pathname;
+	}
 
 	return workspaceUrl(slug, rest.length ? `/${rest.join("/")}` : "/");
 }

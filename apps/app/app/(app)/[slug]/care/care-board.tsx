@@ -74,6 +74,7 @@ const outcomeLabel = new Map([
 export function CareBoard({ userId }: { userId: string }) {
 	const trpc = useTRPC();
 	const cache = useCrmCache();
+	const workspaceUrl = useWorkspaceUrl();
 	const [brand, setBrand] = useState<"ALL" | "UMEHA" | "LI_EN_SPORT">("ALL");
 	const [state, setState] = useState<"ACTIVE" | "WAITING" | "DONE" | "ALL">(
 		"ACTIVE",
@@ -123,6 +124,36 @@ export function CareBoard({ userId }: { userId: string }) {
 					</AlertDescription>
 				</Alert>
 			)}
+			{summary.data?.syncConfigured &&
+				summary.data.sources.some(
+					(source) => source.lastError || !source.lastSuccessAt,
+				) && (
+					<Alert>
+						<AlertTitle>Nguồn chưa đồng bộ đầy đủ</AlertTitle>
+						<AlertDescription>
+							{summary.data.sources
+								.filter((source) => source.lastError || !source.lastSuccessAt)
+								.map((source) => (
+									<p key={source.id}>
+										{source.id.startsWith("UMEHA:") ? "UMEHA" : "Li En Sport"}:{" "}
+										{source.lastError === "SOURCE_HTTP_429"
+											? "Nhà cung cấp đang giới hạn tốc độ; hệ thống chờ trước khi kiểm tra lại."
+											: source.lastError === "PANCAKE_PAGINATION_INCOMPLETE"
+												? "Số hội thoại vượt giới hạn một lượt kiểm tra."
+												: source.lastError
+													? "Dữ liệu nguồn cần được kiểm tra."
+													: "Đang chờ lượt đồng bộ đầy đủ."}
+									</p>
+								))}
+							<p>Chăm sóc chủ động vẫn chờ xác minh hội thoại.</p>
+							<Button asChild variant="outline">
+								<Link href={workspaceUrl("/settings/connections/poscake")}>
+									Xem trạng thái nguồn
+								</Link>
+							</Button>
+						</AlertDescription>
+					</Alert>
+				)}
 			<div className="flex flex-wrap gap-2">
 				<Badge variant="secondary">Chỉ nhắc việc + copy</Badge>
 				<Badge variant="outline">
@@ -497,7 +528,7 @@ function TaskCard({ task, userId }: { task: CareTask; userId: string }) {
 				</p>
 				<p className="break-words text-sm">
 					{task.products
-						.map((p) => `${p.name} (${p.sku}) × ${p.quantity}`)
+						.map((p) => `${p.name} (${p.sku ?? "Chưa có SKU"}) × ${p.quantity}`)
 						.join("; ")}
 				</p>
 				<p className="text-xs text-muted-foreground">

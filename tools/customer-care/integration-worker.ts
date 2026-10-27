@@ -9,6 +9,7 @@ import {
 	messageFeed,
 	normalizeOrder,
 	posOrder,
+	posPageCustomerId,
 	SOURCE_SYNC,
 } from "./source-sync";
 
@@ -136,6 +137,19 @@ export async function processPosWebhooks(
 		const receipt = await db.careWebhookReceipt.findFirstOrThrow({
 			where: { id: candidate.id, leaseToken: token },
 		});
+		if (receipt.eventType === CARE_INTEGRATIONS.customerEventType) {
+			await db.careWebhookReceipt.updateMany({
+				where: { id: receipt.id, state: "RUNNING", leaseToken: token },
+				data: {
+					state: "IGNORED",
+					lastError: "NON_ORDER_CUSTOMER_EVENT",
+					finishedAt: new Date(),
+					leaseToken: null,
+					leaseUntil: null,
+				},
+			});
+			continue;
+		}
 		let sourceLease: { id: string; token: string } | undefined;
 		try {
 			const source = await readCareSource();
@@ -211,7 +225,14 @@ export async function processPosWebhooks(
 					},
 				},
 			});
-			if (existing && pageToken && raw.customer.fb_id) {
+			const customerId = posPageCustomerId(raw.customer.fb_id, channel.pageId);
+			if (
+				existing &&
+				pageToken &&
+				customerId &&
+				(!raw.customer.fb_id?.includes("_") ||
+					existing.sourceId === raw.customer.fb_id)
+			) {
 				const activityUrl = new URL(
 					`https://pages.fm/api/public_api/v1/pages/${channel.pageId}/conversations/${encodeURIComponent(existing.sourceId)}/messages`,
 				);
@@ -220,7 +241,7 @@ export async function processPosWebhooks(
 					messageFeed.parse(await getJson(activityUrl)),
 					channel.pageId,
 					existing.sourceId,
-					raw.customer.fb_id,
+					customerId,
 					now,
 				);
 			}

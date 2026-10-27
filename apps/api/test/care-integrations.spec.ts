@@ -201,6 +201,38 @@ test("webhook rejects wrong keys, shop and payload; stores minimal deduplicated 
 	).rejects.toThrow("chưa bật");
 });
 
+test("customer webhook events never enter the order queue or trigger an order fetch", async () => {
+	const hook = await enabledSource();
+	const result = await service.receiveWebhook(
+		CARE_INTEGRATIONS.posId,
+		hook.key,
+		{ event: "customers", data: { id: "customer-id" } },
+	);
+	expect(result).toEqual({ accepted: true, received: 0, duplicates: 0 });
+	expect(await db.careWebhookReceipt.count()).toBe(0);
+	await db.careWebhookReceipt.create({
+		data: {
+			integrationId: CARE_INTEGRATIONS.posId,
+			eventKey: "old-customer-event",
+			eventType: "customers",
+			shopId: sourceInput.shopId,
+			orderId: "customer-id",
+		},
+	});
+	let calls = 0;
+	globalThis.fetch = Object.assign(async () => {
+		calls++;
+		throw new Error("Must not call the vendor");
+	}, realFetch);
+	await processPosWebhooks(async () => {
+		throw new Error("Must not import");
+	});
+	const receipt = await db.careWebhookReceipt.findFirstOrThrow();
+	expect(receipt.state).toBe("IGNORED");
+	expect(receipt.lastError).toBe("NON_ORDER_CUSTOMER_EVENT");
+	expect(calls).toBe(0);
+});
+
 test("POS check supports order-only credentials and paused source never falls back to environment", async () => {
 	await service.saveSource(sourceInput, manager);
 	await service.action("POSCAKE", 1, manager);

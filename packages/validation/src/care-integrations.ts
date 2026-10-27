@@ -6,6 +6,7 @@ export const CARE_INTEGRATIONS = {
 	posId: "care-poscake",
 	aiId: "care-llm",
 	webhookHeader: "x-crm-webhook-key",
+	customerEventType: "customers",
 	webhookBodyBytes: 256 * 1024,
 	webhookBatch: 20,
 	webhookAttempts: 5,

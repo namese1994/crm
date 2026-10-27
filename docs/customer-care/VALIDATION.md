@@ -4,6 +4,16 @@ Kiểm tra ngày 27/10/2026, giờ Việt Nam. Đây là bằng chứng kỹ thu
 
 ## Kết quả
 
+### Điều tra kết nối thật, 27/10/2026
+
+Nguồn POS trả một số SKU null. Sau sửa, mẫu đầu 50 đơn parse được 50/50; giá trị SKU null được giữ là null. Mã Facebook POS có tiền tố Page ID. Một đối chiếu chỉ đọc đã khớp order → đúng conversation → message feed, với kiểm tra danh tính; không lưu nội dung thô vào log.
+
+Webhook quan sát được là event `customers`, không phải order. Bộ nhận hiện không xếp event này vào order queue. Worker nhận diện và đánh dấu pending cũ là `IGNORED`; không retry các receipt `FAILED`. Không cấu hình hoặc thay đổi webhook POSCake.
+
+Regression source/validation/proxy: 51 ca/134 assertions. Integration/webhook: 11 ca/66 assertions. Typecheck 11 task, lint, anti-slop và các build liên quan đạt. Workspace root chuyển đến care; UI thể hiện nguồn bị chặn. Snapshot thực tế: 494 khách, 633 đơn, 12 hội thoại UMEHA xác minh, 0 enrolled, 0 template duyệt. Li En Sport vẫn chưa quét đủ hội thoại; không xác nhận sẵn sàng production hoặc pilot.
+
+Model NVIDIA free trên OpenRouter đã trả lời text probe. Probe không chứng nhận tool calling/structured output. Tài liệu provider nêu model không hỗ trợ `response_format` và khuyến cáo không gửi dữ liệu mật/cá nhân. AI vẫn tắt; không gửi dữ liệu khách thật cho model.
+
 ### Bổ sung nguồn và AI đang chạy trên staging, 27/10/2026
 
 | Kiểm tra | Bằng chứng hiện tại |

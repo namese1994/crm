@@ -326,6 +326,8 @@ export class CareIntegrationsService {
 			.digest("hex");
 		const receipts: Prisma.CareWebhookReceiptCreateManyInput[] = [];
 		for (const event of events) {
+			const eventType = event.event ?? event.type ?? "order.changed";
+			if (eventType === CARE_INTEGRATIONS.customerEventType) continue;
 			const hints = Array.isArray(event.data)
 				? event.data
 				: [event.data?.order ?? event.order ?? event.data ?? event];
@@ -335,7 +337,6 @@ export class CareIntegrationsService {
 					throw new BadRequestException("Webhook khác shop đã cấu hình");
 				const orderId = hint.order_id ?? hint.id ?? event.order_id;
 				if (!orderId) throw new BadRequestException("Webhook thiếu mã đơn");
-				const eventType = event.event ?? event.type ?? "order.changed";
 				const eventKey = createHash("sha256")
 					.update(
 						JSON.stringify([
@@ -361,10 +362,12 @@ export class CareIntegrationsService {
 			});
 			if (!current.enabled || current.version !== row.version)
 				throw new ConflictException("Nguồn đã đổi; thử lại webhook");
-			const received = await tx.careWebhookReceipt.createMany({
-				data: receipts,
-				skipDuplicates: true,
-			});
+			const received = receipts.length
+				? await tx.careWebhookReceipt.createMany({
+						data: receipts,
+						skipDuplicates: true,
+					})
+				: { count: 0 };
 			await tx.careIntegration.update({
 				where: { id: row.id },
 				data: { lastWebhookAt: new Date() },

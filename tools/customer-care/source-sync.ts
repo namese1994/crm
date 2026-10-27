@@ -12,7 +12,7 @@ const posItem = z.object({
 	quantity: z.number().int().positive(),
 	variation_info: z.object({
 		name: z.string().min(1),
-		display_id: z.string().min(1),
+		display_id: z.string().min(1).nullable(),
 	}),
 });
 export const posOrder = z.object({
@@ -72,7 +72,7 @@ class OrderPagination {
 		return page >= data.total_pages;
 	}
 }
-const pancakePage = z.object({
+export const pancakePage = z.object({
 	success: z.literal(true),
 	conversations: z.array(conversation),
 	has_more: z.boolean().optional(),
@@ -174,6 +174,29 @@ export const SOURCE_SYNC = {
 } as const;
 
 type Channel = z.infer<typeof channelSchema>;
+type Conversation = z.infer<typeof conversation>;
+export function posPageCustomerId(
+	fbId: string | null | undefined,
+	pageId: string,
+): string | undefined {
+	if (!fbId) return undefined;
+	const prefix = `${pageId}_`;
+	if (fbId.startsWith(prefix)) return fbId.slice(prefix.length) || undefined;
+	return fbId.includes("_") ? undefined : fbId;
+}
+
+function sourceConversation(
+	conversations: Map<string, Conversation>,
+	pageId: string,
+	fbId: string | null | undefined,
+) {
+	const customerId = posPageCustomerId(fbId, pageId);
+	if (!customerId) return undefined;
+	const linked = conversations.get(customerId);
+	if (fbId?.includes("_") && linked?.id !== fbId) return undefined;
+	return linked;
+}
+
 export type ImportOrder = (
 	value: CareImport,
 	actor: string,
@@ -248,9 +271,11 @@ async function refreshEnrolled(
 			if (raw) {
 				const order = normalizeOrder(raw, channel, now);
 				if (!order) throw new Error("POS_PAGE_SCOPE_MISMATCH");
-				const linked = raw.customer.fb_id
-					? conversations.get(raw.customer.fb_id)
-					: undefined;
+				const linked = sourceConversation(
+					conversations,
+					channel.pageId,
+					raw.customer.fb_id,
+				);
 				if (linked && token)
 					order.conversation = await loadActivity(
 						channel.pageId,
@@ -467,9 +492,26 @@ export async function syncSources(importOrder: ImportOrder, now = new Date()) {
 			const since = cursor.watermark
 				? new Date(cursor.watermark.getTime() - SOURCE_SYNC.overlapMs)
 				: new Date(now.getTime() - SOURCE_SYNC.initialDays * 86_400_000);
-			const conversations = token
-				? await loadConversations(channel.pageId, token, renewLease)
-				: new Map<string, z.infer<typeof conversation>>();
+			let conversations = new Map<string, z.infer<typeof conversation>>();
+			let conversationError: string | null = null;
+			if (token) {
+				try {
+					conversations = await loadConversations(
+						channel.pageId,
+						token,
+						renewLease,
+					);
+				} catch (error) {
+					if (
+						!(error instanceof Error) ||
+						!["PANCAKE_PAGINATION_INCOMPLETE", "SOURCE_HTTP_429"].includes(
+							error.message,
+						)
+					)
+						throw error;
+					conversationError = error.message;
+				}
+			}
 			const activities = new Map<
 				string,
 				NonNullable<CareImport["conversation"]>
@@ -494,9 +536,11 @@ export async function syncSources(importOrder: ImportOrder, now = new Date()) {
 					await renewLease();
 					const order = normalizeOrder(raw, channel, now);
 					if (!order) continue;
-					const linked = raw.customer.fb_id
-						? conversations.get(raw.customer.fb_id)
-						: undefined;
+					const linked = sourceConversation(
+						conversations,
+						channel.pageId,
+						raw.customer.fb_id,
+					);
 					if (linked && token) {
 						let activity = activities.get(linked.id);
 						if (!activity) {
@@ -516,6 +560,7 @@ export async function syncSources(importOrder: ImportOrder, now = new Date()) {
 				}
 			}
 			if (!complete) throw new Error("POS_PAGINATION_INCOMPLETE");
+			if (conversationError) throw new Error(conversationError);
 			imported += await refreshEnrolled(
 				channel,
 				conversations,

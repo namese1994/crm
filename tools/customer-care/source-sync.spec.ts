@@ -6,6 +6,8 @@ import {
 	messageFeed,
 	normalizeOrder,
 	posOrder,
+	posPageCustomerId,
+	SOURCE_SYNC,
 	syncSources,
 	utcWire,
 } from "./source-sync";
@@ -75,6 +77,13 @@ test("message scope cannot be borrowed from another customer or page", () => {
 	expect(() =>
 		messageActivity(messageFeed.parse(feed), "11", "11_22", "22", new Date()),
 	).toThrow("PANCAKE_IDENTITY_MISMATCH");
+});
+
+test("POS composite Facebook identifiers are limited to their own page", () => {
+	expect(posPageCustomerId("11_22", "11")).toBe("22");
+	expect(posPageCustomerId("22", "11")).toBe("22");
+	expect(posPageCustomerId("12_22", "11")).toBeUndefined();
+	expect(posPageCustomerId("11_", "11")).toBeUndefined();
 });
 
 test("partial pagination and 429 preserve watermark and release lease", async () => {
@@ -172,6 +181,13 @@ test("delivery uses status=3 history, never payment or update time", () => {
 	const normalized = normalizeOrder(raw, channel, new Date());
 	expect(normalized?.deliveredAt).toBe("2026-10-03T10:00:00.000Z");
 	expect(normalized?.products[0]?.sku).toBe(" V35  M ");
+	const missingSku = posOrder.parse({
+		...raw,
+		items: [{ quantity: 1, variation_info: { name: "Mẫu", display_id: null } }],
+	});
+	expect(
+		normalizeOrder(missingSku, channel, new Date())?.products[0]?.sku,
+	).toBeNull();
 	expect(
 		normalizeOrder({ ...raw, status_history: [] }, channel, new Date())
 			?.orderStatus,
@@ -262,7 +278,11 @@ test("enrolled customers refresh even when their order is outside the incrementa
 							status_history: [
 								{ status: 3, updated_at: "2026-10-02T00:00:00" },
 							],
-							customer: { id: customerId, name: "Khách mẫu", fb_id: "22" },
+							customer: {
+								id: customerId,
+								name: "Khách mẫu",
+								fb_id: `${pageId}_22`,
+							},
 							items: [],
 						},
 					]
@@ -340,6 +360,111 @@ async function sourceScenario(
 		await db.careSyncState.delete({ where: { id: key } });
 	}
 }
+
+test(
+	"incomplete conversation scan imports orders but leaves the source blocked and watermark unchanged",
+	async () =>
+		sourceScenario(async ({ pageId, key, now, watermark }) => {
+			let page = 0;
+			const imported: CareImport[] = [];
+			globalThis.fetch = (async (request: string | URL | Request) => {
+				const url = new URL(String(request));
+				if (url.hostname === "pages.fm") {
+					page++;
+					return Response.json({
+						success: true,
+						conversations: Array.from(
+							{ length: SOURCE_SYNC.conversationPageSize },
+							(_, index) => ({
+								id: `${pageId}_${page}_${index}`,
+								type: "INBOX",
+								from: { id: `${page}_${index}` },
+								inserted_at: "2026-10-25T00:00:00",
+								updated_at: "2026-10-26T00:00:00",
+							}),
+						),
+					});
+				}
+				return Response.json({
+					success: true,
+					page_number: 1,
+					total_pages: 1,
+					data: [
+						{
+							id: "partial-scan-order",
+							page_id: pageId,
+							status: 3,
+							inserted_at: "2026-10-24T00:00:00",
+							updated_at: "2026-10-26T00:00:00",
+							status_history: [
+								{ status: 3, updated_at: "2026-10-25T00:00:00" },
+							],
+							customer: { id: "synthetic-customer", name: "Khách mẫu" },
+							items: [
+								{
+									quantity: 1,
+									variation_info: { name: "Mẫu", display_id: null },
+								},
+							],
+						},
+					],
+				});
+			}) as typeof fetch;
+			await syncSources(async (order) => {
+				imported.push(order);
+			}, now);
+			const state = await db.careSyncState.findUniqueOrThrow({
+				where: { id: key },
+			});
+			expect(page).toBe(SOURCE_SYNC.maxPages);
+			expect(imported).toHaveLength(1);
+			expect(imported[0]?.products[0]?.sku).toBeNull();
+			expect(imported[0]?.conversation).toBeNull();
+			expect(state.watermark?.toISOString()).toBe(watermark.toISOString());
+			expect(state.lastSuccessAt).toBeNull();
+			expect(state.lastError).toBe("PANCAKE_PAGINATION_INCOMPLETE");
+		}),
+	20_000,
+);
+
+test("conversation rate limiting preserves source guard while importing the independent order", async () =>
+	sourceScenario(async ({ pageId, key, now, watermark }) => {
+		let conversations = 0;
+		const imported: CareImport[] = [];
+		globalThis.fetch = (async (request: string | URL | Request) => {
+			if (new URL(String(request)).hostname === "pages.fm") {
+				conversations++;
+				return new Response("rate limited", { status: 429 });
+			}
+			return Response.json({
+				success: true,
+				page_number: 1,
+				total_pages: 1,
+				data: [
+					{
+						id: "order",
+						page_id: pageId,
+						status: 0,
+						inserted_at: "2026-10-24T00:00:00",
+						updated_at: "2026-10-26T00:00:00",
+						customer: { id: "customer", name: "Khách mẫu" },
+						items: [],
+					},
+				],
+			});
+		}) as typeof fetch;
+		await syncSources(async (order) => {
+			imported.push(order);
+		}, now);
+		const state = await db.careSyncState.findUniqueOrThrow({
+			where: { id: key },
+		});
+		expect(conversations).toBe(1);
+		expect(imported).toHaveLength(1);
+		expect(imported[0]?.conversation).toBeNull();
+		expect(state.lastError).toBe("SOURCE_HTTP_429");
+		expect(state.watermark?.toISOString()).toBe(watermark.toISOString());
+	}));
 
 for (const scenario of [
 	"repeat-order",

@@ -79,4 +79,11 @@ export function isSlackConfigured(): boolean {
 	return env.slack !== undefined;
 }
 
+export function isCarePasswordEnabled(): boolean {
+	return (
+		process.env.CRM_CARE_MODE === "true" &&
+		process.env.CRM_CARE_PASSWORD_AUTH === "true"
+	);
+}
+
 export { apiUrl, appUrl };

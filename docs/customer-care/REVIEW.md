@@ -40,4 +40,8 @@ Quét diff thay đổi bằng gstack-redact. Scanner gắn nhầm hai Facebook p
 
 ## Trạng thái phát hành
 
+Bổ sung bản test HTTPS: review mật khẩu care không có finding khác sau khi sửa race CLI bằng advisory lock theo email. Password auth cần hai cờ, signup đóng, allow-list kiểm tra session mới. Công cụ cấp tài khoản không ghi đè mật khẩu/role hiện có. Kiểm thử hai CLI đồng thời chỉ tạo một credential.
+
+Lượt toàn repo mới có lỗi `agent/retireExhausted` ở mã baseline không sửa: giới hạn 2 trả 3. Chưa sửa hoặc kết luận nguyên nhân đầy đủ. API/web và luồng chăm sóc được kiểm tra riêng; research agent không chạy ở bản test. Không dùng kết quả 1.390 test trước đây để tuyên bố HEAD mới xanh toàn repo.
+
 Đây là bản để review trên fork. Không merge vào production hoặc đánh dấu A–D hoàn tất từ kết quả kỹ thuật. Repo dùng Conventional Commit và release-please; giữ phiên bản/title theo quy trình repo, không tự đổi sang version bốn thành phần của gstack. Lượt push dùng kết quả kiểm tra từ container Linux thay cho chạy lại hook trên máy Windows; giới hạn GLIBC của codegen được ghi tại VALIDATION.md. Không coi hook gốc là đã đạt.

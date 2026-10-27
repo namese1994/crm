@@ -25,6 +25,10 @@ export class EnvironmentVariables {
 	CRM_CARE_MODE?: string;
 
 	@IsOptional()
+	@IsBooleanString()
+	CRM_CARE_PASSWORD_AUTH?: string;
+
+	@IsOptional()
 	@IsString()
 	CARE_CHANNELS_JSON?: string;
 

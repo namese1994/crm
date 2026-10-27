@@ -9,7 +9,7 @@ import { genericOAuth } from "better-auth/plugins/generic-oauth";
 import { organization } from "better-auth/plugins/organization";
 import { API_KEY_EXPIRATION, API_KEY_HEADER, API_KEY_PREFIX } from "./api-keys";
 import { AUTH_COOKIE_PREFIX } from "./cookies";
-import { env } from "./env";
+import { env, isCarePasswordEnabled } from "./env";
 import { ensureWorkspaceMembership } from "./organization";
 import {
 	GOOGLE_PROVIDER_ID,
@@ -85,7 +85,9 @@ export const auth = betterAuth({
 	}),
 
 	emailAndPassword: {
-		enabled: false,
+		enabled: isCarePasswordEnabled(),
+		disableSignUp: true,
+		minPasswordLength: 12,
 	},
 
 	socialProviders,
@@ -290,6 +292,17 @@ export const auth = betterAuth({
 		session: {
 			create: {
 				before: async (session) => {
+					if (isCarePasswordEnabled()) {
+						const user = await db.user.findUnique({
+							where: { id: session.userId },
+							select: { email: true },
+						});
+						if (!user || !isWorkspaceEmail(user.email)) {
+							throw new APIError("FORBIDDEN", {
+								message: "Địa chỉ này không được phép đăng nhập CRM.",
+							});
+						}
+					}
 					const workspaceId = await ensureWorkspaceMembership(session.userId);
 
 					return {

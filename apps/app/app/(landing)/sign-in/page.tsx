@@ -5,6 +5,7 @@ import { Suspense } from "react";
 import { AuthHeading, AuthShell } from "@/components/auth-shell";
 import { getSession } from "@/lib/session";
 import { getServerQueryClient, getServerTrpc } from "@/lib/trpc/server";
+import { PasswordSignIn } from "./password-sign-in";
 import { SocialSignIn } from "./social-sign-in";
 import { type SsoProvider, SsoSignIn } from "./sso-sign-in";
 
@@ -13,6 +14,7 @@ export const metadata: Metadata = {
 };
 
 type SignInOptions = {
+	password: boolean;
 	google: boolean;
 	microsoft: boolean;
 	providers: SsoProvider[];
@@ -85,7 +87,9 @@ async function SignIn({
 				? configured
 				: [];
 
-	if (!showSso && social.length === 0) {
+	const password = options?.password === true;
+
+	if (!showSso && social.length === 0 && !password) {
 		return (
 			<>
 				<AuthHeading
@@ -106,9 +110,15 @@ async function SignIn({
 	return (
 		<>
 			<AuthHeading
-				title="Welcome back"
-				description="Sign in with your account to continue."
+				title={password ? "Đăng nhập CRM" : "Welcome back"}
+				description={
+					password
+						? "Dùng tài khoản được cấp để vào workspace chăm sóc."
+						: "Sign in with your account to continue."
+				}
 			/>
+
+			{password ? <PasswordSignIn /> : null}
 
 			{showSso ? <SsoSignIn providers={providers} /> : null}
 			{social.map((provider) => (

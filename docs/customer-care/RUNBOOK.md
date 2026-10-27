@@ -26,6 +26,28 @@ Place HTTPS reverse proxy in front of web/API. Configure APP_URL, API_URL, OAuth
 
 CRM_WEB_PORT and CRM_BUN_BIN override PM2's web port and Bun executable. Export them in the launch shell. Postgres stays an independent service. The care worker uses one process and database locks; no AI call is required to schedule or compose a template.
 
+## Pre-provisioned password access
+
+Care mode supports optional email/password login without an external identity provider.
+Set `CRM_CARE_MODE=true` and `CRM_CARE_PASSWORD_AUTH=true` in the root `.env`.
+Keep the exact staff email addresses in `ALLOWED_SIGN_IN`. Public signup stays closed.
+The allow-list is checked when a new care session starts, including existing accounts.
+
+Create a private password file on the server with mode `600`. Use at least 12 characters.
+Do not put the password in a shell command, Git, a log or this document. Run:
+
+```sh
+bun tools/customer-care/provision-access.ts \
+  --database <exact-database-name> \
+  --email <allowed-staff-email> --name <staff-name> --role <owner-or-admin-or-member> \
+  --password-file <private-file-path>
+```
+
+The command checks the explicit database target and requires an existing workspace.
+It creates a hashed credential and membership. It refuses an existing password or a role change.
+It does not mark email verification, enroll customers or approve templates.
+Restart web/API after changing auth configuration. Password reset by email is not configured.
+
 ## Source verification
 
 Read `SOURCE-CONTRACTS.md`. The direct source adapter is not yet live-certified. Source credentials are optional. Missing credentials disable source pulls. No API key, token or URL query is logged.

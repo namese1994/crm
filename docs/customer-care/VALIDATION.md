@@ -7,7 +7,7 @@ Kiểm tra ngày 27/10/2026, giờ Việt Nam. Đây là bằng chứng kỹ thu
 | Hạng mục | Kết quả | Giới hạn |
 |---|---|---|
 | Migration | Hai migration chăm sóc đã áp dụng trên Postgres test | Chưa áp dụng vào database vận hành |
-| Bộ test toàn repo | 1.390 ca đạt, 0 lỗi; 12 task Turbo thành công | Chạy tuần tự trên `crm_care_ci_test`; có cache của các package không đổi |
+| Bộ test toàn repo | Mốc `6b89490` đạt 1.390 ca; lượt triển khai test mới không đạt vì `agent/retireExhausted` | Limit 2 trả 3 ở file baseline không sửa; tái hiện hai lần; không chạy research agent trong bản test chăm sóc |
 | CRM chuyên biệt | 43 ca đạt, 153 assertions | Gồm API/Postgres, quy tắc, mô phỏng API nguồn; chưa có token nguồn thật |
 | Kiểm tra kiểu | 11 task đạt, gồm worker | Sinh tRPC bằng CLI thật trước, rồi chạy `check-types -- --only --concurrency=2` |
 | Lint | Toàn repo đạt; anti-slop 0 cảnh báo, 0 lỗi | Biome còn cảnh báo ở mã upstream; không dùng kết quả này để khẳng định toàn repo không có cảnh báo |
@@ -17,6 +17,8 @@ Kiểm tra ngày 27/10/2026, giờ Việt Nam. Đây là bằng chứng kỹ thu
 | Mobile browser | Hôm nay không tràn ngang ở 360/390/412px; bốn tab không tràn ở 360px | Chromium mô phỏng viewport; chưa thử trên Android thật |
 | Copy / ghi nhận gửi | Copy giữ số lần xác nhận ở 0; xác nhận thủ công tăng lên 1 và đóng việc | Chỉ thao tác với khách mẫu; không gửi Messenger, không chứng minh tin đã đến khách |
 | Xem trước pilot | Quản lý chọn rõ 1–100 khách; báo cáo điều kiện không ghi enrollment, task hoặc event | Chỉ dữ liệu giả lập; chưa có danh sách pilot thật |
+| Đăng nhập và SSO | 19 ca/36 assertions đạt, gồm năm ca mới cho password care | Tài khoản được cấp trước; không signup; chưa nghiệm thu ba nhân viên thật |
+| Hồi quy bản test | API 460 test và app 236 test đạt; 11 task kiểu, lint/anti-slop và ba build đạt | Tách khỏi lỗi research-agent nêu trên; không khẳng định suite toàn repo hiện đạt |
 
 ## Các ca quan trọng đã có test
 
@@ -52,7 +54,7 @@ Chưa chứng minh: đồng bộ xác thực trực tiếp, đủ lịch sử PO
 
 ## Review và bảo mật bổ sung
 
-Review độc lập phát hiện và đã kiểm lại các sửa lỗi về phân trang, lease, freshness nguồn, replay/ack phản hồi, duyệt version, nhận lại việc và mốc pilot đã có công việc. Bộ CRM hiện có 43 ca/153 assertions; bộ toàn repo có 1.390 ca đạt. Lượt mới nhất sau bản xem trước pilot cũng đạt, xem `.scratch/pilot-verification.json`, `.scratch/final-results.json` và `.scratch/pilot-tests.log`.
+Review độc lập phát hiện và đã kiểm lại các sửa lỗi về phân trang, lease, freshness nguồn, replay/ack phản hồi, duyệt version, nhận lại việc và mốc pilot đã có công việc. Bộ CRM có 43 ca/153 assertions; mốc preview trước password auth đạt 1.390 ca toàn repo. Bằng chứng mốc đó: `.scratch/pilot-verification.json` và `.scratch/pilot-tests.log`. Kết quả sau triển khai test nằm ở phần cuối; không dùng `final-results.json` hiện tại làm bằng chứng xanh cho mốc trước.
 
 `bun audit` trước vá báo 15 advisory (6 high, 7 moderate, 2 low), đều có phiên bản liên quan trong baseline. Sau override cùng major, audit báo 0 trên 1.074 package. Xem REVIEW.md để biết phiên bản và nguồn advisory. Đây là kết quả dependency audit, không thay thế pentest hoặc chứng nhận vận hành.
 
@@ -63,3 +65,15 @@ Browser 360px kiểm tra thêm hai luồng dữ liệu mẫu: xử lý phản h�
 Quản lý chọn Khách mẫu 6, yêu cầu báo cáo và thấy 0/1 khách đủ điều kiện. Báo cáo nêu khách đã trong pilot, công việc chưa kết thúc và mốc đã có task. Mốc D+1, ngày giao, lịch và phiên bản mẫu DEMO hiển thị. Ở viewport 360px, document và main đều rộng 360px; console không lỗi hoặc cảnh báo.
 
 So sánh số bản ghi trước/sau bằng truy vấn chỉ đọc: 7 khách, 7 enrollment, 7 task, 56 event, 2 xác nhận gửi mẫu đều không đổi. Không thao tác enroll, copy hoặc xác nhận trong lượt này. Ảnh `output/playwright/care-pilot-preview-360.png`; log `.scratch/pilot-browser-{report,width,console}.log` và `.scratch/pilot-{before,after}.json` bị Git ignore. Đây không phải pilot thực tế.
+
+## Triển khai bản test HTTPS
+
+Phiên trình duyệt sạch đăng nhập bằng tài khoản owner được cấp trước, qua hostname công khai. Cookie session dùng Secure, HttpOnly và SameSite=Lax. Request care không có session trả 401; public signup trả 400. Không bỏ CSRF, kiểm tra origin hoặc session.
+
+Nhận việc và copy khách mẫu giữ số xác nhận ở 2, chỉ thêm hai event claim/copy. Có ô chọn nội dung khi clipboard không cho phép. Xem trước ứng viên mẫu B trả 1/1 đủ điều kiện, mốc D+1 và mẫu DEMO phiên bản 1; trước/sau giữ nguyên 9 khách, 7 enrollment, 7 task, 66 event và 2 xác nhận. Viewport 360/390/412 không tràn; bốn tab không lỗi console. Chưa có Android thật.
+
+Review phát hiện hai CLI cấp mật khẩu đồng thời có thể tạo hai credential. Đã thêm khóa transaction theo email chuẩn hóa, trước lookup/insert. Regression kiểm tra hai child CLI: một thành công, một từ chối, đúng một credential; review độc lập PASS. Không thêm constraint vào bảng auth kế thừa.
+
+Log mới: `.scratch/access-final-api-tests.log`, `access-app-tests.log`, `access-focused-error.log`, `access-types-final.log`, `access-final-lint.log`, `access-slop-final.log`, `access-build-results.json` và `access-browser-*`. Các file này bị ignore. Không coi log `access-types.log` cũ có phần dư từ lượt lỗi trước là kết quả cuối. Không đưa credential/cookie/ảnh test lên Git.
+
+Giới hạn hiện tại: Cloudflare Quick Tunnel tạm, không SLA hoặc hostname cố định; chưa thử reboot host/container; dữ liệu mẫu, nguồn thật và pilot chưa nghiệm thu. Lỗi `agent/retireExhausted` của suite toàn repo còn mở, không sửa ngoài phạm vi chăm sóc. Research agent không chạy trong bản triển khai này.

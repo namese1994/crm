@@ -1,5 +1,9 @@
 import { auth } from "@crm/auth/auth";
-import { isGoogleConfigured, isMicrosoftConfigured } from "@crm/auth/env";
+import {
+	isCarePasswordEnabled,
+	isGoogleConfigured,
+	isMicrosoftConfigured,
+} from "@crm/auth/env";
 import { WORKSPACE_ID, workspaceRoleOf } from "@crm/auth/organization";
 import {
 	canConfigureSso,
@@ -122,6 +126,7 @@ export class SsoService {
 		});
 
 		return {
+			password: isCarePasswordEnabled(),
 			google: isGoogleConfigured(),
 			microsoft: isMicrosoftConfigured(),
 			providers: rows.map((row) => ({

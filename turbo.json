@@ -4,6 +4,7 @@
 	"globalEnv": ["NODE_ENV"],
 	"globalPassThroughEnv": [
 		"CRM_CARE_MODE",
+		"CRM_CARE_PASSWORD_AUTH",
 		"CARE_CHANNELS_JSON",
 		"CARE_POS_API_KEY",
 		"CARE_PANCAKE_TOKENS_JSON",

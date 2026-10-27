@@ -14,6 +14,19 @@ Cập nhật: 27/10/2026, Asia/Ho_Chi_Minh. Đọc cùng BACKLOG.md, SOURCE-CONT
 
 ## Đã triển khai và kiểm tra
 
+### Bản test truy cập được, 27/10/2026
+
+- URL HTTPS tạm: https://essentially-athens-acdbentity-fed.trycloudflare.com . Mở root để đăng nhập; slug hiện tại được chuẩn hóa thành `crm-thu-nghiem-umeha` khi tạo session.
+- Tài khoản owner của Nam được cấp bằng CLI, mật khẩu scrypt hash, không xác nhận email giả. Thông tin đăng nhập nằm riêng trong `.scratch/TEST-ACCESS.md` bị ignore; không đưa vào log, Git hoặc PR.
+- Bật cả `CRM_CARE_MODE` và `CRM_CARE_PASSWORD_AUTH`. Không mở signup công khai. Danh sách email cho phép được kiểm tra lại khi tạo care session.
+- Browser phiên sạch đăng nhập qua URL công khai, nhận việc và chuẩn bị/copy được. Cookie Secure/HttpOnly/SameSite=Lax. Không session trả 401; signup trả 400. Bốn tab không lỗi console; viewport 360/390/412 không tràn.
+- Có chín hồ sơ tổng hợp, gồm hai ứng viên chưa enroll. Bốn công việc mẫu giao cho Nam. Copy giữ số xác nhận gửi mẫu ở 2; xem trước ứng viên trả 1/1 đủ điều kiện và không đổi số khách/enrollment/task/event/xác nhận.
+- Năm process PM2 đang chạy: ba process CRM, `crm-test-tunnel`, `crm-demo-source-refresh`; đã `pm2 save`. Tunnel tạm không bảo đảm hostname sau restart. Chưa kiểm tra phục hồi sau reboot host/container.
+- Job nguồn mẫu chỉ cập nhật metadata cho ID `demo-` thuộc `demo-shop` trong `crm_care_demo_test`, không reset thao tác người test. Không dùng hoặc chuyển job này sang dữ liệu thật. Không chạy lại seed/reset demo khi Nam đang test.
+- API 460 test đạt; app 236 test đạt; bộ đăng nhập/SSO riêng 19 ca/36 assertions. Kiểu 11 task, lint/anti-slop và ba build đạt. Suite toàn repo mới có lỗi ở `agent/retireExhausted`: limit 2 trả 3, tái hiện hai lần trong file baseline không sửa. Không khẳng định toàn repo hiện xanh; research agent không được triển khai cho bản test này.
+- Review bổ sung sửa race cấp mật khẩu đồng thời bằng advisory lock theo email chuẩn hóa. Hai CLI đồng thời chỉ tạo một credential. Review độc lập đã kiểm lại và PASS.
+- Bản test không thay thế D02/D03. Ba nhân viên thật, chính sách, nguồn runtime, Android thật và pilot quan sát vẫn chưa nghiệm thu. Hướng dẫn: TESTING.md.
+
 - Hai migration: customer care và sync state; bảy model, khóa theo khách/đơn/mốc, event append-only.
 - API có session, quyền quản lý, phân công, claim/copy/xác nhận, template theo tag/phiên bản/duyệt/hết hạn, trạng thái hỗ trợ và đối soát.
 - Worker không dùng AI để tạo từng tin; lịch D+1/5/12/30/60/90 lúc 09:00 VN, khoảng nghỉ 7 ngày, dừng sau hai lần im lặng, chống replay và nhắc bù dồn.
@@ -24,18 +37,18 @@ Cập nhật: 27/10/2026, Asia/Ho_Chi_Minh. Đọc cùng BACKLOG.md, SOURCE-CONT
 - Walkthrough dữ liệu mẫu: copy giữ 0 xác nhận; nhân viên bấm xác nhận thì tăng 1 và việc rời queue.
 - 24 template nháp, chỉ hai template DEMO được duyệt trong database demo; không có ưu đãi thật tự đặt.
 - Quản lý chọn rõ 1–100 khách ở tab Khách hàng để xem trước pilot. Báo cáo chỉ đọc kiểm tra nguồn, người phụ trách, đơn giao, mốc và mẫu đúng tag; không enroll, tạo task hoặc trả nội dung gửi.
-- Toàn repo 1.390 test đạt, 0 lỗi (một phần cache package không đổi); CRM riêng 43 ca/153 assertions; lint và anti-slop đạt; kiểm tra kiểu 11 task sau sinh mã đạt; ba build đạt. Xem giới hạn codegen trong VALIDATION.md.
+- Mốc trước tại `6b89490`: toàn repo 1.390 test đạt. Kết quả mới nhất của bản test và lỗi agent kế thừa nằm ở phần trên; không dùng mốc cũ để kết luận toàn repo hiện đạt. CRM riêng 43 ca/153 assertions vẫn đạt; xem VALIDATION.md.
 
 ## Môi trường thử nghiệm cục bộ
 
 - Bun chính xác 1.4.0: `.scratch/tooling/bun-linux-x64/bun`; không dùng Bun 1.3.14 cũ trong PATH để cập nhật lockfile.
-- Database `crm_care_demo_test`: demo tổng hợp, ba nhân viên mẫu và một quản lý, bảy khách mẫu. Database `crm_care_test`: test riêng; có dữ liệu demo từ lượt phát triển trước nên không dùng để chạy toàn bộ test membership. Database `crm_care_ci_test`: suite toàn repo, tách demo. Chỉ ghi/xóa fixtures do test sở hữu.
+- Database `crm_care_demo_test`: chín khách mẫu, ba nhân viên mẫu, quản lý mẫu và tài khoản test owner của Nam. Database `crm_care_test`: test riêng; có dữ liệu demo từ lượt phát triển trước nên không dùng để chạy toàn bộ test membership. Database `crm_care_ci_test`: suite toàn repo, tách demo. Chỉ ghi/xóa fixtures do test sở hữu.
 - Root `.env` và session demo chỉ nằm trong đường dẫn bị Git ignore. Không in file/cookie/token.
 - PM2 nằm trong `.scratch/ops/node_modules/pm2`, dùng PM2_HOME `.scratch/pm2` tách biệt. Web 3210, API 3211; HTTPS proxy tự ký 3213 chỉ dành cho browser test trong container, chưa phải URL điện thoại hoặc production.
 - Ba process: crm-web, crm-api, crm-care-worker. API/worker chạy binary Bun trực tiếp với interpreter:none để tránh require() async ESM của PM2.
 - Browser CLI session `crm`, chạy từ `.scratch/ops`. Config/session file trong `.scratch`, Chromium headless. Ảnh ở `output/playwright` bị ignore.
 - Sinh tRPC: binary upstream cần GLIBC 2.39; container 2.36. Đã chạy binary qua isolated loader `.scratch/tooling/glibc/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2`, library-path cùng thư mục; không sửa libc hệ thống. Sau codegen chạy `bun run check-types -- --only --concurrency=2`.
-- `.scratch/final-results.json` và `.scratch/final-{tests,lint,slop,types}.log` là lượt toàn repo đạt. Các log `ci-*` cũ có lỗi đã xử lý hoặc lỗi codegen môi trường; không dùng chúng thay lượt cuối.
+- `.scratch/final-results.json` và `final-*` hiện lưu lượt toàn repo có lỗi agent và lỗi kiểu trước sửa. Dùng `access-final-api-tests.log`, `access-app-tests.log`, `access-types-final.log`, `access-final-lint.log`, `access-slop-final.log` và `access-build-results.json` cho kết quả bản test cuối. Không suy ra toàn repo xanh từ các log cũ.
 
 ## Việc tiếp theo
 
@@ -63,7 +76,7 @@ Cập nhật: 27/10/2026, Asia/Ho_Chi_Minh. Đọc cùng BACKLOG.md, SOURCE-CONT
 - Mốc từng có công việc, kể cả đã hủy khi dừng pilot, được báo cần kiểm tra lịch sử. Không hiển thị sẵn sàng khi khóa chống trùng không cho tạo lại.
 - Review độc lập kiểm lại sửa lỗi trên. Ba ca mới kiểm tra quyền, nguồn lỗi, đơn mới chưa giao, giới hạn chọn và báo cáo không ghi dữ liệu.
 - Browser 360px: chọn một khách mẫu đã trong pilot trả 0/1 đủ điều kiện và đúng lý do. Document/main đều 360px, console 0 lỗi. Trước/sau giữ nguyên 7 khách, 7 enrollment, 7 task, 56 event và 2 xác nhận gửi mẫu.
-- `.scratch/pilot-verification.json`: checks, audit và ba build đều exit 0. `.scratch/pilot-tests.log`: 43 ca/153 assertions. Toàn repo mới nhất: 1.390 test đạt. Không cần chạy lại suite khi chỉ thay tài liệu.
+- Mốc preview trước khi thêm đăng nhập mật khẩu: `.scratch/pilot-verification.json` có checks, audit và ba build exit 0; `.scratch/pilot-tests.log` có 43 ca/153 assertions. Kết quả sau triển khai test nằm ở đầu checkpoint. Không cần chạy lại suite khi chỉ thay tài liệu.
 - D02 vẫn cần nguồn runtime, chính sách, đăng nhập nhân viên và danh sách thật. D03 chưa bắt đầu; không có tin khách thật nào được gửi.
 
 ## Heartbeat

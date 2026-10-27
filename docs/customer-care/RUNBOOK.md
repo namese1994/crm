@@ -38,6 +38,15 @@ Enrolled customers with source context older than ten minutes are refreshed sepa
 
 Keep demo and automated tests in separate databases. The synthetic helper uses DATABASE_URL; the test runner uses TEST_DATABASE_URL. Do not point the full suite at a populated demo database: the upstream membership tests require an empty workspace and deliberately refuse to delete foreign members. Do not clear those rows merely to make tests pass.
 
+## Staff recovery
+
+1. Open **Khách hàng** to resolve a pending reply or support issue without a task. Only the assigned staff member or a manager records the result.
+2. Review **Tin đến gần nhất** and enter **Kết quả xử lý hội thoại/hỗ trợ**. Select **Đã xử lý phản hồi/hỗ trợ** after checking Pancake. A newer reply requires a reload and another review.
+3. Customer-profile resolution preserves sent counts, promises and opt-outs. Resolve uncertain sending results on the waiting task first.
+4. Select **Nhận xử lý** to renew the 30-minute task lease. A copied task keeps its prepared text. The interface uses the returned version for confirmation. Record the actual outcome once.
+5. Reload after a task or template version conflict. Review the changed record before retrying. Managers approve or revoke only the reviewed template version.
+6. Wait for a complete successful source cycle after a source error or active sync. Removing credentials does not clear stored source guards. Do not change verification times or leases to unblock contact.
+
 ## Pilot
 
 1. Verify actual source identity, delivery history and message activity.

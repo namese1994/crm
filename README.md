@@ -82,6 +82,8 @@ The care workflow uses verified delivery dates, approved templates, customer tag
 
 Start with the [PM2 runbook](docs/customer-care/RUNBOOK.md), [acceptance backlog](docs/customer-care/BACKLOG.md), [business scenarios](docs/customer-care/SCENARIOS.md) and [validation evidence](docs/customer-care/VALIDATION.md). Live integration and staff pilot acceptance remain open.
 
+Read the [source contracts](docs/customer-care/SOURCE-CONTRACTS.md) for integration boundaries and the [review report](docs/customer-care/REVIEW.md) for checked fixes. Use the [checkpoint](docs/customer-care/CHECKPOINT.md) to resume work.
+
 ## The agent
 
 [`apps/agent`](./apps/agent) is its own deployment, built on

@@ -248,7 +248,10 @@ export function CareBoard({ userId }: { userId: string }) {
 					</div>
 				</TabsContent>
 				<TabsContent value="customers">
-					<CareCustomers canManage={summary.data?.canManage === true} />
+					<CareCustomers
+						canManage={summary.data?.canManage === true}
+						userId={userId}
+					/>
 				</TabsContent>
 				<TabsContent value="templates">
 					<CareTemplates canManage={summary.data?.canManage === true} />
@@ -391,7 +394,8 @@ function TaskCard({ task, userId }: { task: CareTask; userId: string }) {
 	>();
 	const claim = useMutation(
 		trpc.care.claim.mutationOptions({
-			onSuccess: async () => {
+			onSuccess: async (data) => {
+				setVersion(data.version);
 				await cache.care();
 				toast.success("Đã nhận xử lý trong 30 phút");
 			},
@@ -454,6 +458,9 @@ function TaskCard({ task, userId }: { task: CareTask; userId: string }) {
 			reason,
 			until: promised,
 			resolution,
+			expectedInboundAt: task.latestInboundAt
+				? new Date(task.latestInboundAt).toISOString()
+				: null,
 		});
 	};
 	return (
@@ -488,6 +495,11 @@ function TaskCard({ task, userId }: { task: CareTask; userId: string }) {
 					Đơn cập nhật {formatDate(task.customer.syncedAt)} · Tin nhắn được kiểm
 					tra {formatDate(task.customer.conversations[0]?.activityVerifiedAt)}
 				</p>
+				{task.latestInboundAt && (
+					<p className="text-xs text-muted-foreground">
+						Tin đến gần nhất {formatDate(task.latestInboundAt)}
+					</p>
+				)}
 				{task.blockReason && (
 					<Alert>
 						<AlertTitle>Cần kiểm tra trước khi liên hệ</AlertTitle>

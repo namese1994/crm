@@ -13,12 +13,14 @@ import {
 	type CareActionInput,
 	type CareImport,
 	type CareMetrics,
+	type CareSourceLease,
 	type CareTemplateInput,
 	careBlock,
 	careDueAt,
 	careImport,
 	careMetrics,
 	careProducts,
+	careSourceLease,
 	careStep,
 	renderCareTemplate,
 } from "@crm/validation/customer-care";
@@ -39,6 +41,18 @@ const customerContext = {
 	orders: { orderBy: { sourceCreatedAt: "desc" as const } },
 	events: { orderBy: { createdAt: "desc" as const }, take: 15 },
 };
+const sourceContext = {
+	id: true,
+	lastSuccessAt: true,
+	lastError: true,
+	leaseToken: true,
+} as const;
+type CareCustomerContext = Prisma.CareCustomerGetPayload<{
+	include: typeof customerContext;
+}>;
+type CareSourceContext = Prisma.CareSyncStateGetPayload<{
+	select: typeof sourceContext;
+}>;
 
 @Injectable()
 export class CustomerCareService {
@@ -64,7 +78,7 @@ export class CustomerCareService {
 							? { in: ["DONE", "CANCELLED"] }
 							: undefined,
 		};
-		const [rows, total] = await Promise.all([
+		const [rows, total, sources] = await Promise.all([
 			this.db.careTask.findMany({
 				where,
 				orderBy: [{ dueAt: "asc" }, { id: "asc" }],
@@ -73,18 +87,18 @@ export class CustomerCareService {
 				include: { customer: { include: customerContext }, order: true },
 			}),
 			this.db.careTask.count({ where }),
+			this.db.careSyncState.findMany({ select: sourceContext }),
 		]);
 		return {
 			rows: rows.map((task) => ({
 				...task,
-				blockReason: this.block(
-					task.customer,
-					new Date(),
-					task.outcome === "PROMISED",
-				),
+				blockReason:
+					this.block(task.customer, new Date(), task.outcome === "PROMISED") ??
+					this.sourceBlock(task.customer, sources, new Date()),
 				products: careProducts.parse(task.order.products),
 				channelRestricted: task.customer.conversations[0]?.canSend === false,
 				conversationUrl: this.conversationUrl(task.customer.conversations[0]),
+				latestInboundAt: this.latestInboundAt(task.customer),
 			})),
 			total,
 			pageSize: CARE.pageSize,
@@ -110,12 +124,78 @@ export class CustomerCareService {
 					enrolled: true,
 					optedOut: true,
 					openIssue: true,
+					replyPending: true,
+					uncertain: true,
+					conversations: {
+						select: { lastInboundAt: true },
+						orderBy: { lastInboundAt: { sort: "desc", nulls: "last" } },
+						take: 1,
+					},
 					_count: { select: { orders: true, conversations: true } },
 				},
 			}),
 			this.db.careCustomer.count({ where }),
 		]);
-		return { rows, total };
+		return {
+			rows: rows.map((customer) => ({
+				...customer,
+				latestInboundAt: this.latestInboundAt(customer),
+			})),
+			total,
+		};
+	}
+
+	async resolveCustomer(
+		id: string,
+		actorId: string,
+		reason: string,
+		expectedInboundAt: string | null,
+	) {
+		if (!reason.trim()) throw new BadRequestException("Cần ghi kết quả xử lý");
+		const manager = isWorkspaceAdmin(await workspaceRoleOf(actorId, this.db));
+		return this.db.$transaction(async (tx) => {
+			await this.lock(tx, id);
+			const customer = await tx.careCustomer.findUniqueOrThrow({
+				where: { id },
+				include: customerContext,
+			});
+			if (customer.ownerId !== actorId && !manager)
+				throw new ForbiddenException("Khách thuộc nhân viên khác");
+			if (customer.uncertain)
+				throw new ConflictException("Cần đối soát công việc chưa rõ đã gửi");
+			this.assertReviewedInbound(customer, expectedInboundAt);
+			if (!customer.replyPending && !customer.openIssue)
+				return { id: customer.id, replyPending: false, openIssue: false };
+			const updated = await tx.careCustomer.update({
+				where: { id },
+				data: {
+					replyPending: false,
+					openIssue: false,
+					unanswered: customer.replyPending ? 0 : undefined,
+				},
+			});
+			await tx.careEvent.create({
+				data: { customerId: id, actorId, kind: "RESOLVED", reason },
+			});
+			await tx.careTask.updateMany({
+				where: {
+					customerId: id,
+					state: "WAITING",
+					outcome: { in: ["ISSUE", "REPLIED"] },
+				},
+				data: {
+					state: "DONE",
+					outcome: "RESOLVED",
+					leaseUntil: null,
+					version: { increment: 1 },
+				},
+			});
+			return {
+				id: updated.id,
+				replyPending: updated.replyPending,
+				openIssue: updated.openIssue,
+			};
+		});
 	}
 
 	async configureCustomer(
@@ -185,8 +265,22 @@ export class CustomerCareService {
 		});
 	}
 
-	async importOrder(raw: CareImport, actorId: string, now = new Date()) {
+	async importOrder(
+		raw: CareImport,
+		actorId: string,
+		now = new Date(),
+		sourceLease?: CareSourceLease,
+	) {
 		const input = careImport.parse(raw);
+		const lease = sourceLease ? careSourceLease.parse(sourceLease) : null;
+		if (
+			lease &&
+			(!lease.id.startsWith(`${input.brand}:${input.shopId}:`) ||
+				(input.conversation &&
+					lease.id !==
+						`${input.brand}:${input.shopId}:${input.conversation.pageId}`))
+		)
+			throw new ConflictException("SOURCE_SCOPE_MISMATCH");
 		for (const instant of [
 			input.sourceCreatedAt,
 			input.sourceUpdatedAt,
@@ -202,6 +296,11 @@ export class CustomerCareService {
 				);
 		}
 		return this.db.$transaction(async (tx) => {
+			if (lease) {
+				const current = await tx.$queryRaw<{ id: string }[]>`
+					SELECT id FROM "careSyncState" WHERE id = ${lease.id} AND "leaseToken" = ${lease.token} AND "leaseUntil" > clock_timestamp() FOR SHARE`;
+				if (!current.length) throw new ConflictException("SOURCE_LEASE_LOST");
+			}
 			const customer = await tx.careCustomer.upsert({
 				where: {
 					brand_shopId_sourceCustomerId: {
@@ -266,24 +365,29 @@ export class CustomerCareService {
 						"Hội thoại đã liên kết với khách khác; cần xác minh danh tính",
 					);
 				if (!existing || existing.verifiedAt <= new Date(c.verifiedAt)) {
+					const activity = this.conversationValues(c, existing);
 					await tx.careConversation.upsert({
 						where: conversationKey,
 						create: {
 							customerId: customer.id,
 							pageId: c.pageId,
 							sourceId: c.conversationId,
-							...this.conversationValues(c),
+							...activity,
 						},
-						update: this.conversationValues(c),
+						update: activity,
 					});
-					const inbound = c.lastInboundAt ? new Date(c.lastInboundAt) : null;
-					const outbound = c.lastOutboundAt ? new Date(c.lastOutboundAt) : null;
+					const inbound = activity.lastInboundAt;
+					const outbound = activity.lastOutboundAt;
 					const lastOutbound =
 						outbound &&
 						(!customer.lastTouchAt || outbound > customer.lastTouchAt)
 							? outbound
 							: customer.lastTouchAt;
-					if (inbound && (!lastOutbound || inbound > lastOutbound))
+					if (
+						inbound &&
+						(!existing?.lastInboundAt || inbound > existing.lastInboundAt) &&
+						(!lastOutbound || inbound > lastOutbound)
+					)
 						await tx.careCustomer.update({
 							where: { id: customer.id },
 							data: { replyPending: true, unanswered: 0 },
@@ -325,10 +429,25 @@ export class CustomerCareService {
 		});
 	}
 
-	private conversationValues(c: NonNullable<CareImport["conversation"]>) {
+	private conversationValues(
+		c: NonNullable<CareImport["conversation"]>,
+		existing: Pick<
+			CareCustomerContext["conversations"][number],
+			"lastInboundAt" | "lastOutboundAt"
+		> | null,
+	) {
+		const latest = (value: string | null, previous: Date | null) => {
+			const incoming = value ? new Date(value) : null;
+			return incoming && (!previous || incoming > previous)
+				? incoming
+				: previous;
+		};
 		return {
-			lastInboundAt: c.lastInboundAt ? new Date(c.lastInboundAt) : null,
-			lastOutboundAt: c.lastOutboundAt ? new Date(c.lastOutboundAt) : null,
+			lastInboundAt: latest(c.lastInboundAt, existing?.lastInboundAt ?? null),
+			lastOutboundAt: latest(
+				c.lastOutboundAt,
+				existing?.lastOutboundAt ?? null,
+			),
 			verifiedAt: new Date(c.verifiedAt),
 			activityVerifiedAt: c.activityVerifiedAt
 				? new Date(c.activityVerifiedAt)
@@ -438,7 +557,11 @@ export class CustomerCareService {
 					},
 					data: { state: "OPEN", outcome: null, version: { increment: 1 } },
 				});
-				if (this.block(current, now)) return 0;
+				if (
+					this.block(current, now) ||
+					(await this.verifiedSourceBlock(tx, current, now))
+				)
+					return 0;
 				if (
 					await tx.careTask.findFirst({
 						where: { customerId: customer.id, state: { in: [...active] } },
@@ -493,7 +616,7 @@ export class CustomerCareService {
 				row.leaseUntil > now
 			)
 				throw new ConflictException("Một nhân viên đang xử lý");
-			await this.assertEligible(row, now);
+			await this.assertEligible(tx, row, now);
 			await tx.careEvent.create({
 				data: {
 					customerId: row.customerId,
@@ -527,7 +650,7 @@ export class CustomerCareService {
 				include: { customer: { include: customerContext }, order: true },
 			});
 			this.assertLease(row, actorId, now);
-			await this.assertEligible(row, now);
+			await this.assertEligible(tx, row, now);
 			const sent = await tx.careTask.findMany({
 				where: {
 					customerId: row.customerId,
@@ -614,10 +737,18 @@ export class CustomerCareService {
 			if (row.state === "DONE" || row.state === "CANCELLED")
 				throw new ConflictException("Tác vụ đã kết thúc");
 			const changes: Prisma.CareCustomerUpdateInput = {};
+			if (
+				row.customer.replyPending &&
+				["RESOLVED", "SNOOZE"].includes(input.result)
+			)
+				this.assertReviewedInbound(
+					row.customer,
+					input.expectedInboundAt ?? null,
+				);
 			let state: "DONE" | "WAITING" = "DONE";
 			if (input.result === "SENT_MANUAL") {
 				this.assertLease(row, actorId, now);
-				await this.assertEligible(row, now);
+				await this.assertEligible(tx, row, now);
 				if (row.state !== "COPIED" || !row.templateId || !row.snapshot)
 					throw new ConflictException(
 						"Cần chuẩn bị nội dung trước khi xác nhận",
@@ -738,15 +869,27 @@ export class CustomerCareService {
 			: this.db.careTemplate.create({ data: values });
 	}
 
-	async approveTemplate(id: string, actorId: string, approved: boolean) {
+	async approveTemplate(
+		id: string,
+		actorId: string,
+		approved: boolean,
+		version: number,
+	) {
 		await this.requireManager(actorId);
-		return this.db.careTemplate.update({
-			where: { id },
-			data: {
-				approvedAt: approved ? new Date() : null,
-				approvedBy: approved ? actorId : null,
-				version: { increment: 1 },
-			},
+		return this.db.$transaction(async (tx) => {
+			const changed = await tx.careTemplate.updateMany({
+				where: { id, version },
+				data: {
+					approvedAt: approved ? new Date() : null,
+					approvedBy: approved ? actorId : null,
+					version: { increment: 1 },
+				},
+			});
+			if (changed.count !== 1)
+				throw new ConflictException(
+					"Mẫu đã thay đổi; tải lại và duyệt đúng phiên bản",
+				);
+			return tx.careTemplate.findUniqueOrThrow({ where: { id } });
 		});
 	}
 
@@ -780,11 +923,7 @@ export class CustomerCareService {
 			sentManual,
 			customers,
 			sources,
-			syncConfigured: Boolean(
-				process.env.CARE_CHANNELS_JSON &&
-					process.env.CARE_POS_API_KEY &&
-					process.env.CARE_PANCAKE_TOKENS_JSON,
-			),
+			syncConfigured: this.sourcesConfigured(),
 			demo: new URL(
 				process.env.DATABASE_URL ?? "postgresql://localhost/unknown",
 			).pathname.endsWith("_test"),
@@ -975,13 +1114,16 @@ export class CustomerCareService {
 	}
 
 	private async assertEligible(
+		tx: Tx,
 		row: Prisma.CareTaskGetPayload<{
 			include: { customer: { include: typeof customerContext }; order: true };
 		}>,
 		now: Date,
 	) {
 		const promised = row.outcome === "PROMISED" && row.dueAt <= now;
-		const reason = this.block(row.customer, now, promised);
+		const reason =
+			this.block(row.customer, now, promised) ??
+			(await this.verifiedSourceBlock(tx, row.customer, now));
 		if (reason) throw new ConflictException(reason);
 		if (
 			row.customer.orders[0]?.id !== row.orderId ||
@@ -990,6 +1132,71 @@ export class CustomerCareService {
 			(!promised && careStep(row.order.deliveredAt, now)?.day !== row.milestone)
 		)
 			throw new ConflictException("Đơn hoặc mốc chăm sóc đã thay đổi");
+	}
+
+	private sourcesConfigured() {
+		return Boolean(
+			process.env.CARE_CHANNELS_JSON &&
+				process.env.CARE_POS_API_KEY &&
+				process.env.CARE_PANCAKE_TOKENS_JSON,
+		);
+	}
+
+	private sourceBlock(
+		customer: CareCustomerContext,
+		sources: CareSourceContext[],
+		now: Date,
+	) {
+		const page = customer.conversations[0]?.pageId;
+		const source = sources.find(
+			(state) => state.id === `${customer.brand}:${customer.shopId}:${page}`,
+		);
+		if (!source && !this.sourcesConfigured()) return null;
+		if (!source?.lastSuccessAt)
+			return "Chưa có lượt đồng bộ đầy đủ cho nguồn này";
+		if (source.lastError) return "Nguồn đang có lỗi hoặc đồng bộ chưa đầy đủ";
+		if (source.leaseToken) return "Nguồn đang cập nhật; thử lại khi hoàn tất";
+		if (
+			now.getTime() - source.lastSuccessAt.getTime() > CARE.freshMs ||
+			source.lastSuccessAt.getTime() > now.getTime() + 60_000
+		)
+			return "Chưa xác minh lượt đồng bộ gần đây";
+		return null;
+	}
+
+	private async verifiedSourceBlock(
+		tx: Tx,
+		customer: CareCustomerContext,
+		now: Date,
+	) {
+		const key = `${customer.brand}:${customer.shopId}:${customer.conversations[0]?.pageId}`;
+		const sources = await tx.$queryRaw<CareSourceContext[]>`
+			SELECT id, "lastSuccessAt", "lastError", "leaseToken" FROM "careSyncState" WHERE id = ${key} FOR SHARE`;
+		return this.sourceBlock(customer, sources, now);
+	}
+
+	private latestInboundAt(customer: {
+		conversations: { lastInboundAt: Date | null }[];
+	}) {
+		return customer.conversations.reduce<Date | null>(
+			(latest, conversation) =>
+				conversation.lastInboundAt &&
+				(!latest || conversation.lastInboundAt > latest)
+					? conversation.lastInboundAt
+					: latest,
+			null,
+		);
+	}
+
+	private assertReviewedInbound(
+		customer: { conversations: { lastInboundAt: Date | null }[] },
+		expected: string | null,
+	) {
+		const latest = this.latestInboundAt(customer)?.getTime() ?? null;
+		if (latest !== (expected ? new Date(expected).getTime() : null))
+			throw new ConflictException(
+				"Có phản hồi mới; tải lại và kiểm tra trước khi xử lý",
+			);
 	}
 
 	private assertLease(

@@ -1,5 +1,8 @@
 import { db } from "@crm/db";
-import type { CareImport } from "@crm/validation/customer-care";
+import type {
+	CareImport,
+	CareSourceLease,
+} from "@crm/validation/customer-care";
 import { z } from "zod";
 
 const id = z.union([z.string().min(1), z.number().int()]).transform(String);
@@ -44,6 +47,29 @@ const posPage = z.object({
 	total_pages: z.number().int().nonnegative(),
 	page_number: z.number().int().positive(),
 });
+class OrderPagination {
+	private totalPages: number | undefined;
+	private seen = new Set<string>();
+
+	accept(data: z.infer<typeof posPage>, page: number) {
+		if (data.page_number !== page) throw new Error("POS_PAGE_MISMATCH");
+		if (this.totalPages !== undefined && this.totalPages !== data.total_pages)
+			throw new Error("POS_PAGINATION_CHANGED");
+		if (
+			(data.total_pages === 0 && data.data.length > 0) ||
+			(data.total_pages > 0 &&
+				(page > data.total_pages ||
+					(data.data.length === 0 && !(page === 1 && data.total_pages === 1))))
+		)
+			throw new Error("POS_PAGE_INCOMPLETE");
+		this.totalPages = data.total_pages;
+		for (const order of data.data) {
+			if (this.seen.has(order.id)) throw new Error("POS_DUPLICATE_ORDER");
+			this.seen.add(order.id);
+		}
+		return page >= data.total_pages;
+	}
+}
 const pancakePage = z.object({
 	success: z.literal(true),
 	conversations: z.array(conversation),
@@ -150,6 +176,7 @@ type ImportOrder = (
 	value: CareImport,
 	actor: string,
 	now: Date,
+	sourceLease: CareSourceLease,
 ) => Promise<unknown>;
 
 function orderListUrl(channel: Channel, page: number) {
@@ -184,6 +211,7 @@ async function refreshEnrolled(
 	importOrder: ImportOrder,
 	now: Date,
 	renewLease: () => Promise<void>,
+	sourceLease: CareSourceLease,
 ) {
 	const customers = await db.careCustomer.findMany({
 		where: {
@@ -199,12 +227,13 @@ async function refreshEnrolled(
 	});
 	let imported = 0;
 	for (const customer of customers) {
+		const pagination = new OrderPagination();
 		for (let page = 1; page <= SOURCE_SYNC.maxPages; page++) {
 			await renewLease();
 			const url = orderListUrl(channel, page);
 			url.searchParams.set("customer_id", customer.sourceCustomerId);
 			const data = posPage.parse(await getJson(url));
-			if (data.page_number !== page) throw new Error("POS_PAGE_MISMATCH");
+			const complete = pagination.accept(data, page);
 			if (
 				data.data.some((raw) => raw.customer.id !== customer.sourceCustomerId)
 			)
@@ -223,11 +252,12 @@ async function refreshEnrolled(
 						token,
 						now,
 					);
-				await importOrder(order, "source-refresh", now);
+				await renewLease();
+				await importOrder(order, "source-refresh", now, sourceLease);
 				imported++;
 				break;
 			}
-			if (page >= data.total_pages) break;
+			if (complete) break;
 			if (page === SOURCE_SYNC.maxPages)
 				throw new Error("POS_CUSTOMER_PAGINATION_INCOMPLETE");
 		}
@@ -254,6 +284,7 @@ async function loadConversations(
 	renewLease: () => Promise<void>,
 ) {
 	const conversations = new Map<string, z.infer<typeof conversation>>();
+	const seen = new Set<string>();
 	let cursor: string | undefined;
 	for (let page = 1; page <= SOURCE_SYNC.maxPages; page++) {
 		await renewLease();
@@ -264,9 +295,16 @@ async function loadConversations(
 		if (cursor) url.searchParams.set("last_conversation_id", cursor);
 		url.searchParams.set("type", "INBOX");
 		const data = pancakePage.parse(await getJson(url));
-		for (const c of data.conversations)
-			if (c.type === "INBOX" && c.id.startsWith(`${pageId}_`))
-				conversations.set(c.from.id, c);
+		for (const c of data.conversations) {
+			if (seen.has(c.id)) throw new Error("PANCAKE_DUPLICATE_CONVERSATION");
+			seen.add(c.id);
+			if (c.type !== "INBOX") continue;
+			if (!c.id.startsWith(`${pageId}_`))
+				throw new Error("PANCAKE_PAGE_SCOPE_MISMATCH");
+			if (conversations.has(c.from.id))
+				throw new Error("PANCAKE_CUSTOMER_AMBIGUOUS");
+			conversations.set(c.from.id, c);
+		}
 		if (conversationsComplete(data)) return conversations;
 		const next = data.conversations.at(-1)?.id;
 		if (!next || next === cursor) throw new Error("PANCAKE_CURSOR_STALLED");
@@ -361,6 +399,7 @@ export async function syncSources(importOrder: ImportOrder, now = new Date()) {
 			update: {},
 		});
 		const leaseToken = crypto.randomUUID();
+		const sourceLease = { id: key, token: leaseToken };
 		const previousAttempt = await db.careSyncState.findUniqueOrThrow({
 			where: { id: key },
 		});
@@ -409,6 +448,7 @@ export async function syncSources(importOrder: ImportOrder, now = new Date()) {
 				NonNullable<CareImport["conversation"]>
 			>();
 			let complete = false;
+			const pagination = new OrderPagination();
 			for (let page = 1; page <= SOURCE_SYNC.maxPages; page++) {
 				await renewLease();
 				const url = orderListUrl(channel, page);
@@ -422,8 +462,9 @@ export async function syncSources(importOrder: ImportOrder, now = new Date()) {
 					String(Math.floor(now.getTime() / 1000)),
 				);
 				const data = posPage.parse(await getJson(url));
-				if (data.page_number !== page) throw new Error("POS_PAGE_MISMATCH");
+				const lastPage = pagination.accept(data, page);
 				for (const raw of data.data) {
+					await renewLease();
 					const order = normalizeOrder(raw, channel, now);
 					if (!order) continue;
 					const linked = raw.customer.fb_id
@@ -437,11 +478,12 @@ export async function syncSources(importOrder: ImportOrder, now = new Date()) {
 						}
 						order.conversation = activity;
 					}
-					await importOrder(order, "source-sync", now);
+					await renewLease();
+					await importOrder(order, "source-sync", now, sourceLease);
 					imported++;
 				}
 				await renewLease();
-				if (page >= data.total_pages) {
+				if (lastPage) {
 					complete = true;
 					break;
 				}
@@ -454,6 +496,7 @@ export async function syncSources(importOrder: ImportOrder, now = new Date()) {
 				importOrder,
 				now,
 				renewLease,
+				sourceLease,
 			);
 			await db.careSyncState.updateMany({
 				where: { id: key, leaseToken },

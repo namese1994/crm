@@ -2,10 +2,12 @@ import {
 	careActionInput,
 	careBrand,
 	careCustomerInput,
+	careCustomerResolution,
 	careImport,
 	careListInput,
 	careMetrics,
 	careTaskInput,
+	careTemplateApproval,
 	careTemplateInput,
 } from "@crm/validation/customer-care";
 import { Inject } from "@nestjs/common";
@@ -75,6 +77,19 @@ export class CustomerCareRouter {
 		return this.care.claim(input.id, ctx.user.id);
 	}
 
+	@Mutation({ input: careCustomerResolution })
+	resolveCustomer(
+		@Input() input: z.infer<typeof careCustomerResolution>,
+		@Ctx() ctx: AuthedTrpcContext,
+	) {
+		return this.care.resolveCustomer(
+			input.id,
+			ctx.user.id,
+			input.reason,
+			input.expectedInboundAt,
+		);
+	}
+
 	@Mutation({ input: careTaskInput })
 	copy(
 		@Input() input: z.infer<typeof careTaskInput>,
@@ -104,14 +119,17 @@ export class CustomerCareRouter {
 		return this.care.saveTemplate(input, ctx.user.id);
 	}
 
-	@Mutation({
-		input: z.object({ id: z.string().min(1), approved: z.boolean() }),
-	})
+	@Mutation({ input: careTemplateApproval })
 	approveTemplate(
-		@Input() input: { id: string; approved: boolean },
+		@Input() input: z.infer<typeof careTemplateApproval>,
 		@Ctx() ctx: AuthedTrpcContext,
 	) {
-		return this.care.approveTemplate(input.id, ctx.user.id, input.approved);
+		return this.care.approveTemplate(
+			input.id,
+			ctx.user.id,
+			input.approved,
+			input.version,
+		);
 	}
 
 	@Mutation({ input: careImport })

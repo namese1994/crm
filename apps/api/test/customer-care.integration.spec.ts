@@ -105,6 +105,392 @@ afterAll(async () => {
 	await db.$disconnect();
 });
 
+describe("care sync and reply recovery", () => {
+	test("approval checks the exact reviewed template version", async () => {
+		const first = await service.saveTemplate(
+			{
+				brand: "UMEHA",
+				purpose: "CHECK_IN",
+				name: `${prefix}-approval-version`,
+				body: "Bản đầu {{customer}}",
+				requiredTags: ["approval-only"],
+				excludedTags: [],
+				validUntil: null,
+			},
+			manager,
+		);
+		const edited = await service.saveTemplate(
+			{ ...first, body: "Bản sửa {{customer}}", validUntil: null },
+			manager,
+		);
+		await expect(
+			service.approveTemplate(first.id, manager, true, first.version),
+		).rejects.toThrow("Mẫu đã thay đổi");
+		expect(
+			(await db.careTemplate.findUniqueOrThrow({ where: { id: first.id } }))
+				.approvedAt,
+		).toBeNull();
+		const approved = await service.approveTemplate(
+			edited.id,
+			manager,
+			true,
+			edited.version,
+		);
+		expect(approved.body).toBe("Bản sửa {{customer}}");
+		await expect(
+			service.approveTemplate(first.id, manager, false, first.version),
+		).rejects.toThrow();
+		await service.approveTemplate(
+			approved.id,
+			manager,
+			false,
+			approved.version,
+		);
+	});
+
+	test("owner resolves a first-sync reply without a task and replay does not reopen it", async () => {
+		const input = fixture("resolve-without-task");
+		input.conversation.lastInboundAt = "2026-10-26T10:00:00Z";
+		const imported = await service.importOrder(input, manager, now);
+		await service.configureCustomer(
+			{ id: imported.customerId, enrolled: true, ownerId: actor, tags: [] },
+			manager,
+		);
+		await service.tick(now);
+		expect(
+			await db.careTask.count({ where: { customerId: imported.customerId } }),
+		).toBe(0);
+		await expect(
+			service.resolveCustomer(
+				imported.customerId,
+				`${prefix}-other`,
+				"Đã xử lý",
+				input.conversation.lastInboundAt,
+			),
+		).rejects.toThrow();
+		await expect(
+			service.resolveCustomer(
+				imported.customerId,
+				actor,
+				"",
+				input.conversation.lastInboundAt,
+			),
+		).rejects.toThrow();
+		await service.resolveCustomer(
+			imported.customerId,
+			actor,
+			"Đã giải đáp trong Pancake",
+			input.conversation.lastInboundAt,
+		);
+		await service.importOrder(input, manager, now);
+		await service.importOrder(
+			{
+				...input,
+				conversation: { ...input.conversation, lastInboundAt: null },
+			},
+			manager,
+			now,
+		);
+		await service.importOrder(input, manager, now);
+		expect(
+			(
+				await db.careCustomer.findUniqueOrThrow({
+					where: { id: imported.customerId },
+				})
+			).replyPending,
+		).toBe(false);
+		await service.tick(now);
+		expect(
+			await db.careTask.count({ where: { customerId: imported.customerId } }),
+		).toBe(1);
+		await service.importOrder(
+			{
+				...input,
+				conversation: {
+					...input.conversation,
+					lastInboundAt: "2026-10-27T02:00:00Z",
+				},
+			},
+			manager,
+			now,
+		);
+		expect(
+			(
+				await db.careCustomer.findUniqueOrThrow({
+					where: { id: imported.customerId },
+				})
+			).replyPending,
+		).toBe(true);
+		await expect(
+			service.resolveCustomer(
+				imported.customerId,
+				actor,
+				"Đã đọc phản hồi cũ",
+				input.conversation.lastInboundAt,
+			),
+		).rejects.toThrow("phản hồi mới");
+		const staleTask = await db.careTask.findFirstOrThrow({
+			where: { customerId: imported.customerId },
+		});
+		await expect(
+			service.action(
+				{
+					id: staleTask.id,
+					version: staleTask.version,
+					result: "RESOLVED",
+					reason: "Đã xử lý phản hồi cũ",
+					expectedInboundAt: input.conversation.lastInboundAt,
+				},
+				actor,
+				now,
+			),
+		).rejects.toThrow("phản hồi mới");
+		await service.resolveCustomer(
+			imported.customerId,
+			actor,
+			"Đã xử lý phản hồi mới",
+			"2026-10-27T02:00:00Z",
+		);
+	});
+
+	test("customer resolution closes support tasks and preserves promises, opt-out and uncertainty", async () => {
+		const task = await enrolled("resolve-support");
+		await service.action(
+			{
+				id: task.id,
+				version: task.version,
+				result: "ISSUE",
+				reason: "Cần hỗ trợ",
+			},
+			actor,
+			now,
+		);
+		const promiseAt = new Date("2026-10-29T02:00:00Z");
+		const promise = await db.careTask.create({
+			data: {
+				customerId: task.customerId,
+				orderId: task.orderId,
+				milestone: 5,
+				purpose: "USE_VALUE",
+				dueAt: promiseAt,
+				state: "WAITING",
+				outcome: "PROMISED",
+			},
+		});
+		await db.careCustomer.update({
+			where: { id: task.customerId },
+			data: { pausedUntil: promiseAt, optedOut: true },
+		});
+		await service.resolveCustomer(
+			task.customerId,
+			actor,
+			"Đã xử lý hỗ trợ",
+			null,
+		);
+		expect(
+			(await db.careTask.findUniqueOrThrow({ where: { id: task.id } })).state,
+		).toBe("DONE");
+		expect(
+			(await db.careTask.findUniqueOrThrow({ where: { id: promise.id } }))
+				.state,
+		).toBe("WAITING");
+		const customer = await db.careCustomer.findUniqueOrThrow({
+			where: { id: task.customerId },
+		});
+		expect(customer.pausedUntil?.toISOString()).toBe(promiseAt.toISOString());
+		expect(customer.optedOut).toBe(true);
+		expect(customer.lastTouchAt).toBeNull();
+		await db.careCustomer.update({
+			where: { id: task.customerId },
+			data: { uncertain: true, openIssue: true },
+		});
+		await expect(
+			service.resolveCustomer(
+				task.customerId,
+				actor,
+				"Không được vượt đối soát",
+				null,
+			),
+		).rejects.toThrow("đối soát");
+	});
+
+	test("source health blocks claim and confirmation after an incomplete sync", async () => {
+		const task = await enrolled("source-health");
+		const input = fixture("source-health");
+		const key = `UMEHA:test-shop:${input.conversation.pageId}`;
+		const saved = {
+			channels: process.env.CARE_CHANNELS_JSON,
+			key: process.env.CARE_POS_API_KEY,
+			tokens: process.env.CARE_PANCAKE_TOKENS_JSON,
+		};
+		process.env.CARE_CHANNELS_JSON = "test-configuration";
+		process.env.CARE_POS_API_KEY = "test-only";
+		process.env.CARE_PANCAKE_TOKENS_JSON = "test-only";
+		try {
+			await expect(service.claim(task.id, actor, now)).rejects.toThrow(
+				"đồng bộ đầy đủ",
+			);
+			await db.careSyncState.create({
+				data: { id: key, lastSuccessAt: now, leaseToken: "in-flight" },
+			});
+			await expect(service.claim(task.id, actor, now)).rejects.toThrow(
+				"đang cập nhật",
+			);
+			await db.careSyncState.update({
+				where: { id: key },
+				data: { leaseToken: null, lastError: "POS_DUPLICATE_ORDER" },
+			});
+			await expect(service.claim(task.id, actor, now)).rejects.toThrow(
+				"chưa đầy đủ",
+			);
+			await db.careSyncState.update({
+				where: { id: key },
+				data: { lastError: null },
+			});
+			await service.claim(task.id, actor, now);
+			const template = await service.saveTemplate(
+				{
+					brand: "UMEHA",
+					purpose: "CHECK_IN",
+					name: `${prefix}-source-health`,
+					body: "{{customer}} cần hỗ trợ gì ạ?",
+					requiredTags: ["source-health"],
+					excludedTags: [],
+					validUntil: null,
+				},
+				manager,
+			);
+			await service.approveTemplate(
+				template.id,
+				manager,
+				true,
+				template.version,
+			);
+			await service.configureCustomer(
+				{
+					id: task.customerId,
+					enrolled: true,
+					ownerId: actor,
+					tags: ["source-health"],
+				},
+				manager,
+			);
+			const prepared = await service.copy(task.id, actor, now);
+			await db.careSyncState.update({
+				where: { id: key },
+				data: { lastError: "SOURCE_HTTP_429" },
+			});
+			await expect(
+				service.action(
+					{
+						id: task.id,
+						version: prepared.version,
+						result: "SENT_MANUAL",
+						reason: "",
+					},
+					actor,
+					now,
+				),
+			).rejects.toThrow("chưa đầy đủ");
+			expect(
+				(
+					await db.careCustomer.findUniqueOrThrow({
+						where: { id: task.customerId },
+					})
+				).lastTouchAt,
+			).toBeNull();
+			delete process.env.CARE_POS_API_KEY;
+			await expect(
+				service.action(
+					{
+						id: task.id,
+						version: prepared.version,
+						result: "SENT_MANUAL",
+						reason: "",
+					},
+					actor,
+					now,
+				),
+			).rejects.toThrow("chưa đầy đủ");
+		} finally {
+			for (const [name, value] of [
+				["CARE_CHANNELS_JSON", saved.channels],
+				["CARE_POS_API_KEY", saved.key],
+				["CARE_PANCAKE_TOKENS_JSON", saved.tokens],
+			] as const) {
+				if (value === undefined) delete process.env[name];
+				else process.env[name] = value;
+			}
+			await db.careSyncState.deleteMany({ where: { id: key } });
+		}
+	});
+
+	test("source writes reject expired, replaced and cross-scope lease tokens", async () => {
+		const input = fixture("source-fence");
+		const key = `UMEHA:test-shop:${input.conversation.pageId}`;
+		await db.careSyncState.create({
+			data: {
+				id: key,
+				leaseToken: "current",
+				leaseUntil: new Date(Date.now() + 60_000),
+			},
+		});
+		try {
+			await expect(
+				service.importOrder(input, "source-sync", now, {
+					id: key,
+					token: "old",
+				}),
+			).rejects.toThrow("SOURCE_LEASE_LOST");
+			await db.careSyncState.update({
+				where: { id: key },
+				data: { leaseUntil: new Date(Date.now() - 60_000) },
+			});
+			await expect(
+				service.importOrder(input, "source-sync", now, {
+					id: key,
+					token: "current",
+				}),
+			).rejects.toThrow("SOURCE_LEASE_LOST");
+			expect(
+				await db.careCustomer.count({
+					where: { sourceCustomerId: input.customerId },
+				}),
+			).toBe(0);
+			await db.careSyncState.update({
+				where: { id: key },
+				data: { leaseUntil: new Date(Date.now() + 60_000) },
+			});
+			await service.importOrder(input, "source-sync", now, {
+				id: key,
+				token: "current",
+			});
+			await db.careSyncState.update({
+				where: { id: key },
+				data: { leaseToken: "replacement" },
+			});
+			await expect(
+				service.importOrder(
+					{ ...input, customerName: "Không được ghi" },
+					"source-sync",
+					now,
+					{ id: key, token: "current" },
+				),
+			).rejects.toThrow("SOURCE_LEASE_LOST");
+			await expect(
+				service.importOrder(
+					{ ...input, brand: "LI_EN_SPORT" },
+					"source-sync",
+					now,
+					{ id: key, token: "replacement" },
+				),
+			).rejects.toThrow("SOURCE_SCOPE_MISMATCH");
+		} finally {
+			await db.careSyncState.delete({ where: { id: key } });
+		}
+	});
+});
+
 describe("manual customer care", () => {
 	test("a relevant tagged template outranks a newer generic template", async () => {
 		const task = await enrolled("specific-template");
@@ -129,7 +515,12 @@ describe("manual customer care", () => {
 					},
 					manager,
 				);
-				await service.approveTemplate(template.id, manager, true);
+				await service.approveTemplate(
+					template.id,
+					manager,
+					true,
+					template.version,
+				);
 				await db.careTemplate.update({
 					where: { id: template.id },
 					data: {
@@ -238,7 +629,7 @@ describe("manual customer care", () => {
 			},
 			manager,
 		);
-		await service.approveTemplate(template.id, manager, true);
+		await service.approveTemplate(template.id, manager, true, template.version);
 		const copy = await service.copy(task.id, actor, now);
 		expect(copy.text).toContain("Sản phẩm kiểm thử");
 		expect(
@@ -252,7 +643,12 @@ describe("manual customer care", () => {
 				})
 			).lastTouchAt,
 		).toBeNull();
-		await service.approveTemplate(template.id, manager, false);
+		await service.approveTemplate(
+			template.id,
+			manager,
+			false,
+			template.version + 1,
+		);
 		await expect(
 			service.action(
 				{
@@ -284,7 +680,7 @@ describe("manual customer care", () => {
 			},
 			manager,
 		);
-		await service.approveTemplate(template.id, manager, true);
+		await service.approveTemplate(template.id, manager, true, template.version);
 		await service.claim(task.id, actor, now);
 		const copied = await service.copy(task.id, actor, now);
 		const results = await Promise.allSettled([
@@ -474,7 +870,7 @@ describe("manual customer care", () => {
 			},
 			manager,
 		);
-		await service.approveTemplate(template.id, manager, true);
+		await service.approveTemplate(template.id, manager, true, template.version);
 		await service.claim(task.id, actor, now);
 		const copied = await service.copy(task.id, actor, now);
 		expect(copied.text).toContain("TAG_RULE");
@@ -521,7 +917,7 @@ describe("manual customer care", () => {
 			},
 			manager,
 		);
-		await service.approveTemplate(template.id, manager, true);
+		await service.approveTemplate(template.id, manager, true, template.version);
 		await service.claim(task.id, actor, now);
 		expect((await service.copy(task.id, actor, now)).text).toBeTruthy();
 		expect(

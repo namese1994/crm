@@ -28,7 +28,13 @@ import type { RouterOutputs } from "@/lib/trpc/types";
 
 type Customer = RouterOutputs["care"]["customers"]["rows"][number];
 
-export function CareCustomers({ canManage }: { canManage: boolean }) {
+export function CareCustomers({
+	canManage,
+	userId,
+}: {
+	canManage: boolean;
+	userId: string;
+}) {
 	const trpc = useTRPC();
 	const [page, setPage] = useState(1);
 	const rows = useQuery(trpc.care.customers.queryOptions({ page }));
@@ -51,6 +57,7 @@ export function CareCustomers({ canManage }: { canManage: boolean }) {
 						key={customer.id}
 						customer={customer}
 						canManage={canManage}
+						canResolve={canManage || customer.ownerId === userId}
 					/>
 				))}
 			</div>
@@ -80,14 +87,27 @@ export function CareCustomers({ canManage }: { canManage: boolean }) {
 function CustomerCard({
 	customer,
 	canManage,
+	canResolve,
 }: {
 	customer: Customer;
 	canManage: boolean;
+	canResolve: boolean;
 }) {
 	const trpc = useTRPC();
 	const cache = useCrmCache();
 	const [ownerId, setOwnerId] = useState(customer.ownerId ?? "");
 	const [tags, setTags] = useState(customer.tags.join(", "));
+	const [resolution, setResolution] = useState("");
+	const resolve = useMutation(
+		trpc.care.resolveCustomer.mutationOptions({
+			onSuccess: async () => {
+				setResolution("");
+				await cache.care();
+				toast.success("Đã ghi nhận xử lý hội thoại/hỗ trợ");
+			},
+			onError: (error) => toast.error(error.message),
+		}),
+	);
 	const users = useQuery(trpc.users.list.queryOptions());
 	const save = useMutation(
 		trpc.care.configureCustomer.mutationOptions({
@@ -115,6 +135,12 @@ function CustomerCard({
 						<Badge variant="destructive">Từ chối nhận</Badge>
 					)}
 					{customer.openIssue && <Badge variant="outline">Đang hỗ trợ</Badge>}
+					{customer.replyPending && (
+						<Badge variant="outline">Chờ xử lý phản hồi</Badge>
+					)}
+					{customer.uncertain && (
+						<Badge variant="outline">Cần đối soát việc đã copy</Badge>
+					)}
 				</div>
 				<p className="break-all text-sm">
 					Shop {customer.shopId} · Khách {customer.sourceCustomerId}
@@ -123,6 +149,47 @@ function CustomerCard({
 					{customer._count.orders} đơn · {customer._count.conversations} hội
 					thoại
 				</p>
+				{customer.latestInboundAt && (
+					<p className="text-sm">
+						Tin đến gần nhất:{" "}
+						{new Date(customer.latestInboundAt).toLocaleString("vi-VN", {
+							timeZone: "Asia/Ho_Chi_Minh",
+						})}
+					</p>
+				)}
+				{canResolve &&
+					(customer.replyPending || customer.openIssue) &&
+					!customer.uncertain && (
+						<>
+							<Field>
+								<FieldLabel htmlFor={`resolve-${customer.id}`}>
+									Kết quả xử lý hội thoại/hỗ trợ
+								</FieldLabel>
+								<Input
+									id={`resolve-${customer.id}`}
+									value={resolution}
+									onChange={(event) => setResolution(event.target.value)}
+									maxLength={500}
+								/>
+							</Field>
+							<Button
+								size="touch"
+								variant="outline"
+								disabled={resolve.isPending || !resolution.trim()}
+								onClick={() =>
+									resolve.mutate({
+										id: customer.id,
+										reason: resolution,
+										expectedInboundAt: customer.latestInboundAt
+											? new Date(customer.latestInboundAt).toISOString()
+											: null,
+									})
+								}
+							>
+								Đã xử lý phản hồi/hỗ trợ
+							</Button>
+						</>
+					)}
 				{canManage && (
 					<>
 						<FieldGroup>

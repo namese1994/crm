@@ -297,3 +297,204 @@ test("enrolled customers refresh even when their order is outside the incrementa
 		await db.careSyncState.delete({ where: { id: key } });
 	}
 });
+
+let scenarioSequence = 0;
+async function sourceScenario(
+	run: (context: {
+		pageId: string;
+		key: string;
+		now: Date;
+		watermark: Date;
+	}) => Promise<void>,
+) {
+	const pageId = `6${Date.now()}${scenarioSequence++}`;
+	const key = `UMEHA:987003:${pageId}`;
+	const saved = {
+		channels: process.env.CARE_CHANNELS_JSON,
+		key: process.env.CARE_POS_API_KEY,
+		tokens: process.env.CARE_PANCAKE_TOKENS_JSON,
+		fetch: globalThis.fetch,
+	};
+	const now = new Date("2026-10-27T03:00:00Z");
+	const watermark = new Date("2026-10-26T03:00:00Z");
+	process.env.CARE_CHANNELS_JSON = JSON.stringify([
+		{ brand: "UMEHA", shopId: "987003", pageId },
+	]);
+	process.env.CARE_POS_API_KEY = "test-only";
+	process.env.CARE_PANCAKE_TOKENS_JSON = JSON.stringify({
+		[pageId]: "test-only",
+	});
+	await db.careSyncState.create({ data: { id: key, watermark } });
+	try {
+		await run({ pageId, key, now, watermark });
+	} finally {
+		globalThis.fetch = saved.fetch;
+		for (const [name, value] of [
+			["CARE_CHANNELS_JSON", saved.channels],
+			["CARE_POS_API_KEY", saved.key],
+			["CARE_PANCAKE_TOKENS_JSON", saved.tokens],
+		] as const) {
+			if (value === undefined) delete process.env[name];
+			else process.env[name] = value;
+		}
+		await db.careSyncState.delete({ where: { id: key } });
+	}
+}
+
+for (const scenario of [
+	"repeat-order",
+	"changed-pages",
+	"empty-last-page",
+	"complete",
+] as const) {
+	test(`POS pagination ${scenario} preserves complete-scan semantics`, async () =>
+		sourceScenario(async ({ pageId, key, now, watermark }) => {
+			const imported: string[] = [];
+			globalThis.fetch = (async (request: string | URL | Request) => {
+				const url = new URL(String(request));
+				if (url.hostname === "pages.fm")
+					return Response.json({
+						success: true,
+						conversations: [],
+						has_more: false,
+					});
+				const page = Number(url.searchParams.get("page_number"));
+				return Response.json({
+					success: true,
+					page_number: page,
+					total_pages: scenario === "changed-pages" && page === 2 ? 1 : 2,
+					data:
+						scenario === "empty-last-page" && page === 2
+							? []
+							: [
+									{
+										id: scenario === "repeat-order" ? "one" : String(page),
+										page_id: pageId,
+										status: 0,
+										inserted_at: "2026-10-25T00:00:00",
+										updated_at: "2026-10-26T00:00:00",
+										customer: { id: "test", name: "Khách mẫu" },
+										items: [],
+									},
+								],
+				});
+			}) as typeof fetch;
+			await syncSources(async (order) => {
+				imported.push(order.orderId);
+			}, now);
+			const state = await db.careSyncState.findUniqueOrThrow({
+				where: { id: key },
+			});
+			expect(state.watermark?.toISOString()).toBe(
+				scenario === "complete" ? now.toISOString() : watermark.toISOString(),
+			);
+			expect(state.lastError).toBe(
+				scenario === "repeat-order"
+					? "POS_DUPLICATE_ORDER"
+					: scenario === "changed-pages"
+						? "POS_PAGINATION_CHANGED"
+						: scenario === "empty-last-page"
+							? "POS_PAGE_INCOMPLETE"
+							: null,
+			);
+			expect(imported).toHaveLength(scenario === "complete" ? 2 : 1);
+			expect(state.leaseToken).toBeNull();
+		}));
+}
+
+test("overlapping conversation cursors fail without overwriting newer identity", async () =>
+	sourceScenario(async ({ pageId, key, now, watermark }) => {
+		let requests = 0;
+		let imported = 0;
+		globalThis.fetch = (async (request: string | URL | Request) => {
+			const url = new URL(String(request));
+			requests++;
+			if (requests === 2)
+				expect(url.searchParams.get("last_conversation_id")).toBe(
+					`${pageId}_22`,
+				);
+			return Response.json({
+				success: true,
+				has_more: requests === 1,
+				conversations: [
+					{
+						id: `${pageId}_22`,
+						type: "INBOX",
+						from: { id: "22" },
+						inserted_at: "2026-10-25T00:00:00",
+						updated_at: "2026-10-26T00:00:00",
+					},
+				],
+			});
+		}) as typeof fetch;
+		await syncSources(async () => {
+			imported++;
+		}, now);
+		const state = await db.careSyncState.findUniqueOrThrow({
+			where: { id: key },
+		});
+		expect(state.lastError).toBe("PANCAKE_DUPLICATE_CONVERSATION");
+		expect(state.watermark?.toISOString()).toBe(watermark.toISOString());
+		expect(imported).toBe(0);
+		expect(requests).toBe(2);
+	}));
+
+test("a replaced lease stops an old worker after the activity request", async () =>
+	sourceScenario(async ({ pageId, key, now, watermark }) => {
+		let imported = 0;
+		globalThis.fetch = (async (request: string | URL | Request) => {
+			const url = new URL(String(request));
+			if (url.pathname.endsWith("/messages")) {
+				await db.careSyncState.update({
+					where: { id: key },
+					data: { leaseToken: "replacement-worker" },
+				});
+				return Response.json({
+					success: true,
+					conversation_id: `${pageId}_22`,
+					conv_from: { id: "22" },
+					messages: [],
+				});
+			}
+			if (url.hostname === "pages.fm")
+				return Response.json({
+					success: true,
+					has_more: false,
+					conversations: [
+						{
+							id: `${pageId}_22`,
+							type: "INBOX",
+							from: { id: "22" },
+							inserted_at: "2026-10-25T00:00:00",
+							updated_at: "2026-10-26T00:00:00",
+						},
+					],
+				});
+			return Response.json({
+				success: true,
+				total_pages: 1,
+				page_number: 1,
+				data: [
+					{
+						id: "one",
+						page_id: pageId,
+						status: 0,
+						inserted_at: "2026-10-25T00:00:00",
+						updated_at: "2026-10-26T00:00:00",
+						customer: { id: "test", name: "Khách mẫu", fb_id: "22" },
+						items: [],
+					},
+				],
+			});
+		}) as typeof fetch;
+		await syncSources(async () => {
+			imported++;
+		}, now);
+		const state = await db.careSyncState.findUniqueOrThrow({
+			where: { id: key },
+		});
+		expect(imported).toBe(0);
+		expect(state.watermark?.toISOString()).toBe(watermark.toISOString());
+		expect(state.leaseToken).toBe("replacement-worker");
+		expect(state.lastError).toBeNull();
+	}));

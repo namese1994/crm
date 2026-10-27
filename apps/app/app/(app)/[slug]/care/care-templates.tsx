@@ -269,6 +269,7 @@ export function CareTemplates({ canManage }: { canManage: boolean }) {
 									onClick={() =>
 										approve.mutate({
 											id: template.id,
+											version: template.version,
 											approved: !template.approvedAt,
 										})
 									}

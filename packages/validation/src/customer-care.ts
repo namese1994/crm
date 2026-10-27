@@ -69,6 +69,8 @@ export const careResult = z.enum([
 	"RESOLVED",
 ]);
 const sourceId = z.string().min(1).max(160);
+export const careSourceLease = z.object({ id: sourceId, token: sourceId });
+export type CareSourceLease = z.infer<typeof careSourceLease>;
 const instant = z.iso.datetime({ offset: true });
 
 export const careProducts = z
@@ -137,6 +139,16 @@ export const careListInput = z.object({
 	state: z.enum(["ACTIVE", "WAITING", "DONE", "ALL"]).default("ACTIVE"),
 });
 export const careTaskInput = z.object({ id: sourceId });
+export const careTemplateApproval = z.object({
+	id: sourceId,
+	version: z.number().int().positive(),
+	approved: z.boolean(),
+});
+export const careCustomerResolution = z.object({
+	id: sourceId,
+	reason: z.string().trim().min(1).max(500),
+	expectedInboundAt: instant.nullable(),
+});
 export const careActionInput = z.object({
 	id: sourceId,
 	version: z.number().int().nonnegative(),
@@ -144,6 +156,7 @@ export const careActionInput = z.object({
 	reason: z.string().trim().max(500).default(""),
 	until: instant.optional(),
 	resolution: z.enum(["SENT", "NOT_SENT"]).optional(),
+	expectedInboundAt: instant.nullable().optional(),
 });
 export const careCustomerInput = z.object({
 	id: sourceId,

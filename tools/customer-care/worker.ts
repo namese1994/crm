@@ -21,8 +21,8 @@ process.on("SIGINT", stop);
 
 while (!stopping) {
 	try {
-		await syncSources((input, actor, now) =>
-			care.importOrder(input, actor, now),
+		await syncSources((input, actor, now, sourceLease) =>
+			care.importOrder(input, actor, now, sourceLease),
 		);
 		await care.tick();
 	} catch {

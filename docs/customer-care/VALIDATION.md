@@ -7,8 +7,8 @@ Kiểm tra ngày 27/10/2026, giờ Việt Nam. Đây là bằng chứng kỹ thu
 | Hạng mục | Kết quả | Giới hạn |
 |---|---|---|
 | Migration | Hai migration chăm sóc đã áp dụng trên Postgres test | Chưa áp dụng vào database vận hành |
-| Bộ test toàn repo | 1.376 ca đạt, 0 lỗi; 12 task Turbo thành công | Chạy tuần tự trên `crm_care_ci_test`; có cache của các package không đổi |
-| CRM chuyên biệt | 29 ca đạt, 79 assertions | Gồm API/Postgres, quy tắc, mô phỏng API nguồn; chưa có token nguồn thật |
+| Bộ test toàn repo | 1.387 ca đạt, 0 lỗi; 12 task Turbo thành công | Chạy tuần tự trên `crm_care_ci_test`; có cache của các package không đổi |
+| CRM chuyên biệt | 40 ca đạt, 133 assertions | Gồm API/Postgres, quy tắc, mô phỏng API nguồn; chưa có token nguồn thật |
 | Kiểm tra kiểu | 11 task đạt, gồm worker | Sinh tRPC bằng CLI thật trước, rồi chạy `check-types -- --only --concurrency=2` |
 | Lint | Toàn repo đạt; anti-slop 0 cảnh báo, 0 lỗi | Biome còn cảnh báo ở mã upstream; không dùng kết quả này để khẳng định toàn repo không có cảnh báo |
 | Build | Web production, API và worker thành công | Bản preview chạy trong container phát triển |
@@ -46,3 +46,11 @@ Binary `nestjs-trpc@2.13.0` của upstream cần GLIBC 2.39, còn container này
 Các log trong `.scratch/final-results.json`, `.scratch/final-{tests,lint,slop,types}.log`, `.scratch/care-tests-final.log` và `.scratch/browser-*.log` được giữ cục bộ, không đưa lên Git. Ảnh viewport trong `output/playwright/care-mobile-{360,390,412}.png`. Không có cookie, token, nội dung khách thật trong tài liệu này.
 
 Chưa chứng minh: đồng bộ xác thực trực tiếp, đủ lịch sử POS, chính sách/ưu đãi đã duyệt, đăng nhập nhân viên thật, thiết bị Android thật, triển khai HTTPS và pilot khoảng hai tuần. D02/D03 vẫn mở.
+
+## Review và bảo mật bổ sung
+
+Review độc lập phát hiện và đã kiểm lại các sửa lỗi về phân trang, lease, freshness nguồn, replay/ack phản hồi, duyệt version và nhận lại việc. Bộ CRM hiện có 40 ca/133 assertions; bộ toàn repo có 1.387 ca đạt. Lượt sau thay đổi dependency cũng đạt, xem `.scratch/final-results.json` và `.scratch/post-review-status.json`.
+
+`bun audit` trước vá báo 15 advisory (6 high, 7 moderate, 2 low), đều có phiên bản liên quan trong baseline. Sau override cùng major, audit báo 0 trên 1.074 package. Xem REVIEW.md để biết phiên bản và nguồn advisory. Đây là kết quả dependency audit, không thay thế pentest hoặc chứng nhận vận hành.
+
+Browser 360px kiểm tra thêm hai luồng dữ liệu mẫu: xử lý phản hồi từ hồ sơ không có task giữ nguyên bộ đếm gửi; copy, nhận lại và xác nhận tăng đúng một lần, không lỗi version. Vùng main và document đều rộng 360px, console không lỗi. Không có tin Messenger nào được gửi trong các thao tác này.

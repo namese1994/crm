@@ -74,6 +74,14 @@ because nobody can tell it is wrong.
   </tr>
 </table>
 
+## Manual customer care in this fork
+
+This fork adds a Vietnamese post-purchase care workspace at `/<workspace-slug>/care`. Set `CRM_CARE_MODE=true` to use it without the optional research and mailbox onboarding. Session authentication and manager permissions still apply.
+
+The care workflow uses verified delivery dates, approved templates, customer tags and staff assignments. Staff copy content and record outcomes manually. The application does not send customer messages. POSCake and Pancake source reads require separate runtime configuration and verification.
+
+Start with the [PM2 runbook](docs/customer-care/RUNBOOK.md), [acceptance backlog](docs/customer-care/BACKLOG.md), [business scenarios](docs/customer-care/SCENARIOS.md) and [validation evidence](docs/customer-care/VALIDATION.md). Live integration and staff pilot acceptance remain open.
+
 ## The agent
 
 [`apps/agent`](./apps/agent) is its own deployment, built on

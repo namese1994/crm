@@ -22,7 +22,7 @@ Cập nhật: 27/10/2026, Asia/Ho_Chi_Minh. Đọc cùng BACKLOG.md, SOURCE-CONT
 - Đã sửa sai selector Radix khiến tabs xếp ngang/tràn vùng main; bốn tab không tràn ở 360px, queue không tràn ở 360/390/412px.
 - Walkthrough dữ liệu mẫu: copy giữ 0 xác nhận; nhân viên bấm xác nhận thì tăng 1 và việc rời queue.
 - 24 template nháp, chỉ hai template DEMO được duyệt trong database demo; không có ưu đãi thật tự đặt.
-- Toàn repo 1.376 test đạt, 0 lỗi (một phần cache package không đổi); CRM riêng 29 ca/79 assertions; lint và anti-slop đạt; kiểm tra kiểu 11 task sau sinh mã đạt; ba build đạt. Xem giới hạn codegen trong VALIDATION.md.
+- Toàn repo 1.387 test đạt, 0 lỗi (một phần cache package không đổi); CRM riêng 40 ca/133 assertions; lint và anti-slop đạt; kiểm tra kiểu 11 task sau sinh mã đạt; ba build đạt. Xem giới hạn codegen trong VALIDATION.md.
 
 ## Môi trường thử nghiệm cục bộ
 
@@ -37,11 +37,22 @@ Cập nhật: 27/10/2026, Asia/Ho_Chi_Minh. Đọc cùng BACKLOG.md, SOURCE-CONT
 
 ## Việc tiếp theo
 
-1. Kiểm tra độ trôi phân trang và cân nhắc đối soát định kỳ; nguồn runtime vẫn chưa có credentials trong app. Không sửa cursor/claim của hệ thống n8n hiện tại.
+1. Đã kiểm tra phân trang lặp, tổng trang đổi, trang cuối rỗng, cursor hội thoại lặp và lease bị thay. Cân nhắc đối soát định kỳ sau chứng nhận nguồn thật; nguồn runtime vẫn chưa có credentials trong app. Không sửa cursor/claim của hệ thống n8n hiện tại.
 2. Chuẩn bị đồng bộ branch đã kiểm thử lên fork để review, theo quy trình ship của repo; chưa push hoặc mở PR tại checkpoint này.
 3. Code đã lưu commit riêng file CRM. `git diff --numstat` phản ánh thay đổi thực, còn `git status` có thể liệt kê file không đổi vì mount/CRLF. Không `add -A`, restore/reset toàn repo; không đưa `.env`, cookie, ảnh/log thử nghiệm hoặc dữ liệu khách thật lên Git. Hai migration đã áp dụng có dòng trắng cuối file; tránh sửa checksum chỉ để dọn whitespace trong các database test đã tạo.
 4. Khi có cấu hình server/auth/token nguồn và chính sách đã duyệt: chứng nhận sync trực tiếp, triển khai HTTPS, đăng nhập ba nhân viên, chọn rõ 50–100 khách pilot; không mặc nhiên enroll khách thật.
 5. Quan sát pilot khoảng hai tuần với Android thật rồi mới nghiệm thu D03.
+
+## Review bổ sung 27/10/2026
+
+- Đã sửa lease hết hạn/đổi chủ bằng fencing trong transaction, kiểm tra token trước mỗi import và giữ trạng thái nguồn đến khi hoàn tất. Nguồn lỗi/in-flight/chưa có lượt đầy đủ chặn claim/copy/xác nhận. Thiếu credentials không bỏ qua lịch sử nguồn lỗi đã lưu.
+- Giữ thời điểm tin đến/đi tăng dần; replay phản hồi đã xử lý không mở lại. Chủ khách/quản lý xử lý phản hồi/hỗ trợ từ tab Khách hàng ngay cả khi chưa có task.
+- Xử lý phản hồi so khớp thời điểm đã xem dưới khóa khách; phản hồi mới làm thao tác cũ bị từ chối. Đóng WAITING ISSUE/REPLIED tương ứng, giữ lời hẹn, opt-out và yêu cầu đối soát.
+- Duyệt/thu hồi template so khớp version; UI nhận lại việc cập nhật version để xác nhận không bị lỗi sau copy.
+- Review độc lập đã kiểm lại các sửa lỗi này, không còn finding trong phạm vi review. Chi tiết: REVIEW.md.
+- 15 lỗ hổng dependency đã tồn tại ở baseline. Đã vá bằng override cùng major; bun audit hiện 0 trên 1.074 package. Toàn repo sau vá: 1.387 test đạt, 11 task typecheck đạt sau codegen, lint/anti-slop và ba build đạt.
+- Browser 360px: xử lý khách mẫu chưa có task không tăng số lần gửi; copy → nhận lại → xác nhận thành công, bộ đếm mẫu 1→2; không gửi tin thật, không tràn ngang, console không lỗi.
+- Demo hiện có thêm một khách mẫu phản hồi, đã xử lý qua UI; không tính là pilot. Sau cùng các DB và log vẫn chỉ là môi trường test.
 
 ## Heartbeat
 

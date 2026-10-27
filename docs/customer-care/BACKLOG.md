@@ -47,10 +47,10 @@ Android responsive web is the current assumption from answer #9. APK, offline an
 | B02 | Một phần | Import, replay, lease, 429, refresh khách có đơn cũ đã có test; còn đồng bộ trực tiếp và đối soát đủ lịch sử |
 | B03 | Đạt qua kiểm thử | Membership, phân công, lease, cạnh tranh và audit |
 | B04 | Đạt với dữ liệu mẫu | UI hiển thị ngữ cảnh và độ mới nguồn; khách thật chờ D02 |
-| C01–C05 | Đạt qua kiểm thử kỹ thuật | 29 ca CRM và walkthrough copy/xác nhận; mẫu thật chưa được duyệt |
+| C01–C05 | Đạt qua kiểm thử kỹ thuật | 40 ca CRM và walkthrough copy/xác nhận; mẫu thật chưa được duyệt |
 | C06 | Một phần | Không tràn 360/390/412px; bốn tab ở 360px; chưa nghiệm thu Android thật |
 | C07 | Đạt qua kiểm thử kỹ thuật | Kết quả 30 ngày theo nhân viên, mẫu số khách đã kiểm tra, tin đến sau xác nhận gần nhất và cohort mua lại; không suy diễn nhân quả |
-| D01 | Đạt qua kiểm thử kỹ thuật | 1.376 test toàn repo đạt; typecheck sau codegen, lint và ba build; xem VALIDATION.md |
+| D01 | Đạt qua kiểm thử kỹ thuật | 1.387 test toàn repo đạt; typecheck sau codegen, lint và ba build; xem VALIDATION.md |
 | D02 | Chưa đạt | Chưa có cấu hình đăng nhập nhân viên thật, chính sách đã duyệt, token runtime và danh sách pilot đã chọn |
 | D03 | Chưa bắt đầu | Không có bằng chứng nhân viên/khách thật sử dụng; không tính dữ liệu mẫu là pilot |
 

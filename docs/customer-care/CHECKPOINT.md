@@ -6,7 +6,8 @@ Cập nhật: 27/10/2026, Asia/Ho_Chi_Minh. Đọc cùng BACKLOG.md, SOURCE-CONT
 
 - Fork: https://github.com/namese1994/crm, branch `codex/customer-care`.
 - Baseline upstream main: `711c909cf016e738c5b2e9418310485ad67bee47`.
-- Commit triển khai cục bộ: `f81fab7` (49 file của CRM); chưa push remote hoặc mở PR.
+- Commit nền triển khai: `f81fab7`; bản vá dependency: `04182b1`; bản sửa review: `78f59bc`; đồng bộ tài liệu: `5e0fb40`.
+- Nhánh đã push lên fork. PR nháp: https://github.com/namese1994/crm/pull/1, base `main`. Chưa merge hoặc triển khai production.
 - Windows: `\\100.104.251.126\Documents\AI_Workspace\apps\crm` (alias cũ Y:\AI_Workspace\apps\crm).
 - Linux cùng file: `/workspace/apps/crm`, qua nam-mcp workspace runner, container phát triển.
 - Không sửa gstack/n8n hoặc logic/bảng size. Không gửi tin khách. Không xóa thay đổi ngoài phạm vi.
@@ -38,7 +39,7 @@ Cập nhật: 27/10/2026, Asia/Ho_Chi_Minh. Đọc cùng BACKLOG.md, SOURCE-CONT
 ## Việc tiếp theo
 
 1. Đã kiểm tra phân trang lặp, tổng trang đổi, trang cuối rỗng, cursor hội thoại lặp và lease bị thay. Cân nhắc đối soát định kỳ sau chứng nhận nguồn thật; nguồn runtime vẫn chưa có credentials trong app. Không sửa cursor/claim của hệ thống n8n hiện tại.
-2. Chuẩn bị đồng bộ branch đã kiểm thử lên fork để review, theo quy trình ship của repo; chưa push hoặc mở PR tại checkpoint này.
+2. Theo dõi PR nháp #1 và CI nếu có check-run mới. Không merge hoặc coi toàn bộ A–D hoàn tất từ code/test; các điều kiện vận hành nằm ở D02/D03.
 3. Code đã lưu commit riêng file CRM. `git diff --numstat` phản ánh thay đổi thực, còn `git status` có thể liệt kê file không đổi vì mount/CRLF. Không `add -A`, restore/reset toàn repo; không đưa `.env`, cookie, ảnh/log thử nghiệm hoặc dữ liệu khách thật lên Git. Hai migration đã áp dụng có dòng trắng cuối file; tránh sửa checksum chỉ để dọn whitespace trong các database test đã tạo.
 4. Khi có cấu hình server/auth/token nguồn và chính sách đã duyệt: chứng nhận sync trực tiếp, triển khai HTTPS, đăng nhập ba nhân viên, chọn rõ 50–100 khách pilot; không mặc nhiên enroll khách thật.
 5. Quan sát pilot khoảng hai tuần với Android thật rồi mới nghiệm thu D03.

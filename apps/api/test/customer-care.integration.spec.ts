@@ -105,6 +105,169 @@ afterAll(async () => {
 	await db.$disconnect();
 });
 
+describe("pilot readiness preview", () => {
+	test("only managers preview explicitly selected customers without enrollment, task or copy writes", async () => {
+		const input = fixture("pilot-preview");
+		input.conversation.canSend = false;
+		const imported = await service.importOrder(input, manager, now);
+		await service.configureCustomer(
+			{
+				id: imported.customerId,
+				enrolled: false,
+				ownerId: actor,
+				tags: ["preview-only"],
+			},
+			manager,
+		);
+		const template = await service.saveTemplate(
+			{
+				brand: "UMEHA",
+				purpose: "CHECK_IN",
+				name: `${prefix}-pilot-preview`,
+				body: "{{customer}} sử dụng {{product}} thế nào ạ?",
+				requiredTags: ["preview-only"],
+				excludedTags: [],
+				validUntil: null,
+			},
+			manager,
+		);
+		const approved = await service.approveTemplate(
+			template.id,
+			manager,
+			true,
+			template.version,
+		);
+		const before = await db.careEvent.count({
+			where: { customerId: imported.customerId },
+		});
+		await expect(
+			service.pilotPreview({ ids: [imported.customerId] }, actor, now),
+		).rejects.toThrow("quản lý");
+		const report = await service.pilotPreview(
+			{ ids: [imported.customerId] },
+			manager,
+			now,
+		);
+		expect(report.readOnly).toBe(true);
+		expect(report.ready).toBe(1);
+		expect(report.rows[0]?.channelRestricted).toBe(true);
+		expect(report.rows[0]?.template).toEqual({
+			id: approved.id,
+			name: approved.name,
+			version: approved.version,
+		});
+		expect(
+			(
+				await db.careCustomer.findUniqueOrThrow({
+					where: { id: imported.customerId },
+				})
+			).enrolled,
+		).toBe(false);
+		expect(
+			await db.careTask.count({ where: { customerId: imported.customerId } }),
+		).toBe(0);
+		expect(
+			await db.careEvent.count({ where: { customerId: imported.customerId } }),
+		).toBe(before);
+		await service.configureCustomer(
+			{
+				id: imported.customerId,
+				enrolled: true,
+				ownerId: actor,
+				tags: ["preview-only"],
+			},
+			manager,
+		);
+		expect(
+			(await service.pilotPreview({ ids: [imported.customerId] }, manager, now))
+				.rows[0]?.reasons,
+		).toContain("Khách đã trong pilot");
+		await service.tick(now);
+		await service.configureCustomer(
+			{
+				id: imported.customerId,
+				enrolled: false,
+				ownerId: actor,
+				tags: ["preview-only"],
+			},
+			manager,
+		);
+		const stopped = await service.pilotPreview(
+			{ ids: [imported.customerId] },
+			manager,
+			now,
+		);
+		expect(stopped.ready).toBe(0);
+		expect(stopped.rows[0]?.reasons).toContain(
+			"Mốc chăm sóc này đã có công việc; kiểm tra lịch sử trước khi chọn pilot",
+		);
+	});
+
+	test("preview reports opt-out, source failure and newest pending order instead of a ready candidate", async () => {
+		const input = fixture("pilot-blocked");
+		const imported = await service.importOrder(input, manager, now);
+		await service.configureCustomer(
+			{ id: imported.customerId, enrolled: false, ownerId: actor, tags: [] },
+			manager,
+		);
+		await db.careCustomer.update({
+			where: { id: imported.customerId },
+			data: { optedOut: true },
+		});
+		await service.importOrder(
+			{
+				...input,
+				orderId: `${prefix}-newest-pending`,
+				sourceCreatedAt: fresh,
+				orderStatus: "PENDING",
+				deliveredAt: null,
+				deliveryEvidence: null,
+			},
+			manager,
+			now,
+		);
+		const key = `UMEHA:test-shop:${input.conversation.pageId}`;
+		await db.careSyncState.create({
+			data: { id: key, lastError: "POS_PAGE_INCOMPLETE", lastSuccessAt: now },
+		});
+		try {
+			const report = await service.pilotPreview(
+				{ ids: [imported.customerId] },
+				manager,
+				now,
+			);
+			expect(report.ready).toBe(0);
+			expect(report.rows[0]?.reasons).toContain("Khách từ chối liên hệ");
+			expect(report.rows[0]?.reasons).toContain(
+				"Nguồn đang có lỗi hoặc đồng bộ chưa đầy đủ",
+			);
+			expect(report.rows[0]?.deliveredAt).toBeNull();
+			expect(report.rows[0]?.template).toBeNull();
+		} finally {
+			await db.careSyncState.delete({ where: { id: key } });
+		}
+	});
+
+	test("preview rejects empty, duplicate, missing and oversized selections", async () => {
+		await expect(
+			service.pilotPreview({ ids: [] }, manager, now),
+		).rejects.toThrow();
+		await expect(
+			service.pilotPreview({ ids: ["duplicate", "duplicate"] }, manager, now),
+		).rejects.toThrow("trùng");
+		await expect(
+			service.pilotPreview({ ids: ["not-existing"] }, manager, now),
+		).rejects.toThrow("không còn tồn tại");
+		await expect(
+			service.pilotPreview(
+				{ ids: Array.from({ length: 101 }, (_, index) => `missing-${index}`) },
+				manager,
+				now,
+			),
+		).rejects.toThrow();
+	});
+});
+
 describe("care sync and reply recovery", () => {
 	test("approval checks the exact reviewed template version", async () => {
 		const first = await service.saveTemplate(

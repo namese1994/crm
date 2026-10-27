@@ -16,7 +16,9 @@ Review độc lập chỉ đọc source, không sửa file hoặc gọi nguồn 
 8. Quản lý không được duyệt nội dung đã đổi sau khi mở màn hình. Duyệt/thu hồi kiểm tra version nguyên tử.
 9. Nhận lại việc sau copy cập nhật version phía UI. Xác nhận sau nhận lại đã kiểm tra bằng browser.
 
-Kết quả cuối: 40 ca CRM/133 assertions, 1.387 test toàn repo đạt; typecheck sau codegen, lint, anti-slop và ba build đạt. Các ca là dữ liệu tổng hợp. Các yêu cầu nguồn thật, nhân viên thật, Android thật và pilot vẫn mở.
+Kết quả cuối: 43 ca CRM/153 assertions, 1.390 test toàn repo đạt; typecheck sau codegen, lint, anti-slop và ba build đạt. Các ca là dữ liệu tổng hợp. Các yêu cầu nguồn thật, nhân viên thật, Android thật và pilot vẫn mở.
+
+Review bản xem trước pilot phát hiện mốc đã có task bị hủy vẫn hiển thị đủ điều kiện. Đã sửa để kiểm tra toàn bộ lịch sử công việc của mốc, giữ khóa chống trùng. Review độc lập kiểm lại sửa lỗi và không còn finding trong phạm vi này. Báo cáo chỉ đọc yêu cầu quản lý chọn rõ 1–100 khách; test xác nhận không đổi enrollment, task hoặc event.
 
 ## Dependency audit
 

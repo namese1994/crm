@@ -251,6 +251,7 @@ export function CareBoard({ userId }: { userId: string }) {
 					<CareCustomers
 						canManage={summary.data?.canManage === true}
 						userId={userId}
+						previewLimit={summary.data?.pilotPreviewLimit ?? 0}
 					/>
 				</TabsContent>
 				<TabsContent value="templates">

@@ -13,12 +13,15 @@ import {
 	type CareActionInput,
 	type CareImport,
 	type CareMetrics,
+	type CarePilotPreview,
 	type CareSourceLease,
 	type CareTemplateInput,
 	careBlock,
 	careDueAt,
 	careImport,
 	careMetrics,
+	carePilotPreviewInput,
+	carePilotPreviewOutput,
 	careProducts,
 	careSourceLease,
 	careStep,
@@ -143,6 +146,158 @@ export class CustomerCareService {
 			})),
 			total,
 		};
+	}
+
+	async pilotPreview(
+		raw: z.infer<typeof carePilotPreviewInput>,
+		actorId: string,
+		now = new Date(),
+	): Promise<CarePilotPreview> {
+		await this.requireManager(actorId);
+		const { ids } = carePilotPreviewInput.parse(raw);
+		const [customers, sources, templates, members, history] = await Promise.all(
+			[
+				this.db.careCustomer.findMany({
+					where: { id: { in: ids } },
+					include: {
+						...customerContext,
+						orders: { orderBy: { sourceCreatedAt: "desc" }, take: 1 },
+						events: { take: 0 },
+					},
+				}),
+				this.db.careSyncState.findMany({ select: sourceContext }),
+				this.db.careTemplate.findMany({
+					where: {
+						approvedAt: { not: null },
+						OR: [{ validUntil: null }, { validUntil: { gt: now } }],
+					},
+					orderBy: [{ updatedAt: "desc" }, { id: "asc" }],
+				}),
+				this.db.member.findMany({
+					where: { organizationId: WORKSPACE_ID },
+					select: { userId: true },
+				}),
+				this.db.careTask.findMany({
+					where: {
+						customerId: { in: ids },
+					},
+					select: {
+						customerId: true,
+						templateId: true,
+						orderId: true,
+						milestone: true,
+						state: true,
+						outcome: true,
+					},
+				}),
+			],
+		);
+		if (customers.length !== ids.length)
+			throw new NotFoundException(
+				"Một số khách không còn tồn tại; chọn lại danh sách",
+			);
+		const rows = ids.map((id) => {
+			const customer = customers.find((row) => row.id === id);
+			if (!customer) throw new NotFoundException("Không tìm thấy khách");
+			const reasons: string[] = [];
+			if (customer.enrolled) reasons.push("Khách đã trong pilot");
+			if (
+				!customer.ownerId ||
+				!members.some((member) => member.userId === customer.ownerId)
+			)
+				reasons.push("Cần phân công nhân viên còn trong workspace");
+			const blocked = this.block({ ...customer, enrolled: true }, now);
+			if (blocked) reasons.push(blocked);
+			const sourceBlocked = this.sourceBlock(customer, sources, now);
+			if (sourceBlocked) reasons.push(sourceBlocked);
+			const order = customer.orders[0];
+			const deliveredAt =
+				order?.status === "DELIVERED" && order.deliveryEvidence
+					? order.deliveredAt
+					: null;
+			const step = deliveredAt ? careStep(deliveredAt, now) : undefined;
+			if (!deliveredAt)
+				reasons.push("Thiếu đơn giao thành công có ngày giao được xác minh");
+			else if (!step)
+				reasons.push("Chưa đến mốc chăm sóc hoặc chuỗi đã kết thúc");
+			if (
+				history.some(
+					(row) =>
+						row.customerId === id &&
+						active.some((state) => state === row.state),
+				)
+			)
+				reasons.push("Khách có công việc chăm sóc chưa kết thúc");
+			if (
+				order &&
+				step &&
+				history.some(
+					(row) => row.orderId === order.id && row.milestone === step.day,
+				)
+			)
+				reasons.push(
+					"Mốc chăm sóc này đã có công việc; kiểm tra lịch sử trước khi chọn pilot",
+				);
+			const used = history
+				.filter(
+					(row) =>
+						row.customerId === id &&
+						["SENT_MANUAL", "RECONCILED_SENT"].includes(row.outcome ?? ""),
+				)
+				.map((row) => row.templateId);
+			const template = step
+				? this.pickTemplate(
+						templates.filter(
+							(row) =>
+								row.brand === customer.brand && row.purpose === step.purpose,
+						),
+						customer.tags,
+						used,
+					)
+				: undefined;
+			if (step && !template)
+				reasons.push("Chưa có mẫu đã duyệt phù hợp hoặc mẫu đã dùng");
+			if (template && order) {
+				try {
+					renderCareTemplate(template.body, {
+						customer: customer.name,
+						product: careProducts
+							.parse(order.products)
+							.map((product) => product.name)
+							.join(", "),
+						brand: customer.brand === "UMEHA" ? "UMEHA" : "Li En Sport",
+					});
+				} catch {
+					reasons.push(
+						"Nội dung thiếu biến hoặc thông tin sản phẩm cần kiểm tra",
+					);
+				}
+			}
+			return {
+				id,
+				name: customer.name,
+				brand: customer.brand,
+				eligible: reasons.length === 0,
+				reasons,
+				enrolled: customer.enrolled,
+				deliveredAt,
+				milestone: step?.day ?? null,
+				dueAt: deliveredAt && step ? careDueAt(deliveredAt, step.day) : null,
+				sourceCheckedAt: customer.syncedAt,
+				activityCheckedAt:
+					customer.conversations[0]?.activityVerifiedAt ?? null,
+				channelRestricted: customer.conversations[0]?.canSend === false,
+				template: template
+					? { id: template.id, name: template.name, version: template.version }
+					: null,
+			};
+		});
+		return carePilotPreviewOutput.parse({
+			readOnly: true,
+			generatedAt: now,
+			ready: rows.filter((row) => row.eligible).length,
+			rows,
+		});
 	}
 
 	async resolveCustomer(
@@ -667,14 +822,11 @@ export class CustomerCareService {
 				},
 				orderBy: [{ updatedAt: "desc" }, { id: "asc" }],
 			});
-			const template = templates
-				.filter(
-					(t) =>
-						this.matchesTemplate(t, row.customer.tags) &&
-						!sent.some((event) => event.templateId === t.id),
-				)
-				.sort((a, b) => b.requiredTags.length - a.requiredTags.length)
-				.at(0);
+			const template = this.pickTemplate(
+				templates,
+				row.customer.tags,
+				sent.map((event) => event.templateId),
+			);
 			if (!template)
 				throw new ConflictException(
 					"Chưa có mẫu đã duyệt phù hợp hoặc mẫu đã dùng",
@@ -919,6 +1071,7 @@ export class CustomerCareService {
 			]);
 		return {
 			open,
+			pilotPreviewLimit: CARE.pilotPreviewLimit,
 			waiting,
 			sentManual,
 			customers,
@@ -1067,6 +1220,18 @@ export class CustomerCareService {
 			template.requiredTags.every((tag) => tags.includes(tag)) &&
 			!template.excludedTags.some((tag) => tags.includes(tag))
 		);
+	}
+
+	private pickTemplate<
+		T extends { id: string; requiredTags: string[]; excludedTags: string[] },
+	>(templates: T[], tags: string[], used: (string | null)[]) {
+		return templates
+			.filter(
+				(template) =>
+					this.matchesTemplate(template, tags) && !used.includes(template.id),
+			)
+			.sort((a, b) => b.requiredTags.length - a.requiredTags.length)
+			.at(0);
 	}
 
 	private async lock(tx: Tx, id: string) {

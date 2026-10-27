@@ -31,13 +31,29 @@ type Customer = RouterOutputs["care"]["customers"]["rows"][number];
 export function CareCustomers({
 	canManage,
 	userId,
+	previewLimit,
 }: {
 	canManage: boolean;
 	userId: string;
+	previewLimit: number;
 }) {
 	const trpc = useTRPC();
 	const [page, setPage] = useState(1);
+	const [selected, setSelected] = useState<string[]>([]);
 	const rows = useQuery(trpc.care.customers.queryOptions({ page }));
+	const preview = useQuery({
+		...trpc.care.pilotPreview.queryOptions({ ids: selected }),
+		enabled: false,
+	});
+	const toggle = (id: string) =>
+		setSelected((current) => {
+			if (current.includes(id)) return current.filter((value) => value !== id);
+			if (current.length >= previewLimit) {
+				toast.error("Đã đạt giới hạn xem trước; bỏ chọn khách trước khi thêm");
+				return current;
+			}
+			return [...current, id];
+		});
 	return (
 		<div className="flex flex-col gap-4">
 			<Alert>
@@ -47,6 +63,132 @@ export function CareCustomers({
 					Tên và mã SKU giữ theo nguồn.
 				</AlertDescription>
 			</Alert>
+			{canManage && (
+				<Card>
+					<CardHeader>
+						<CardTitle>Xem trước danh sách pilot</CardTitle>
+					</CardHeader>
+					<CardContent>
+						<p>
+							Chọn khách ở các hồ sơ bên dưới, tối đa {previewLimit} khách mỗi
+							lượt. Dùng báo cáo để rà soát trước khi đưa từng khách vào pilot ở
+							hồ sơ.
+						</p>
+						<div className="flex flex-wrap gap-2">
+							<Badge variant="outline">
+								Đã chọn {selected.length}/{previewLimit}
+							</Badge>
+							<Button
+								size="touch"
+								disabled={selected.length === 0 || preview.isFetching}
+								onClick={() => preview.refetch()}
+							>
+								Xem trước điều kiện
+							</Button>
+							<Button
+								size="touch"
+								variant="outline"
+								disabled={selected.length === 0 || preview.isFetching}
+								onClick={() => setSelected([])}
+							>
+								Bỏ chọn tất cả
+							</Button>
+						</div>
+						{preview.isFetching && (
+							<p role="status">Đang kiểm tra điều kiện…</p>
+						)}
+						{preview.isError && <p role="alert">{preview.error.message}</p>}
+						{preview.data && (
+							<>
+								<p role="status">
+									{preview.data.ready}/{preview.data.rows.length} khách đủ điều
+									kiện hiện tại ·{" "}
+									{new Date(preview.data.generatedAt).toLocaleString("vi-VN", {
+										timeZone: "Asia/Ho_Chi_Minh",
+									})}
+								</p>
+								<p>
+									Đây là bản xem trước để quản lý rà soát. Chọn xem trước không
+									đưa khách vào pilot hoặc tạo nội dung gửi.
+								</p>
+								<div className="grid min-w-0 grid-cols-1 gap-4 lg:grid-cols-2">
+									{preview.data.rows.map((customer) => (
+										<Card key={customer.id}>
+											<CardHeader>
+												<CardTitle>
+													{customer.name} ·{" "}
+													{customer.brand === "UMEHA" ? "UMEHA" : "Li En Sport"}
+												</CardTitle>
+											</CardHeader>
+											<CardContent>
+												<Badge variant="outline">
+													{customer.eligible
+														? "Đủ điều kiện hiện tại"
+														: "Cần xử lý trước"}
+												</Badge>
+												{customer.milestone !== null && (
+													<p>Mốc D+{customer.milestone}</p>
+												)}
+												{customer.deliveredAt && (
+													<p>
+														Giao thành công:{" "}
+														{new Date(customer.deliveredAt).toLocaleString(
+															"vi-VN",
+															{ timeZone: "Asia/Ho_Chi_Minh" },
+														)}
+													</p>
+												)}
+												{customer.dueAt && (
+													<p>
+														Lịch chăm sóc:{" "}
+														{new Date(customer.dueAt).toLocaleString("vi-VN", {
+															timeZone: "Asia/Ho_Chi_Minh",
+														})}
+													</p>
+												)}
+												{customer.template && (
+													<p className="break-words">
+														Mẫu: {customer.template.name} · phiên bản{" "}
+														{customer.template.version}
+													</p>
+												)}
+												{customer.channelRestricted && (
+													<p>
+														Pancake hạn chế gửi qua API. Nhân viên kiểm tra khả
+														năng gửi trực tiếp.
+													</p>
+												)}
+												<ul>
+													{customer.reasons.map((reason) => (
+														<li key={reason}>{reason}</li>
+													))}
+												</ul>
+												<p>
+													Đơn được kiểm tra:{" "}
+													{new Date(customer.sourceCheckedAt).toLocaleString(
+														"vi-VN",
+														{ timeZone: "Asia/Ho_Chi_Minh" },
+													)}
+												</p>
+												<p>
+													Hội thoại được kiểm tra:{" "}
+													{customer.activityCheckedAt
+														? new Date(
+																customer.activityCheckedAt,
+															).toLocaleString("vi-VN", {
+																timeZone: "Asia/Ho_Chi_Minh",
+															})
+														: "chưa xác minh"}
+												</p>
+											</CardContent>
+										</Card>
+									))}
+								</div>
+							</>
+						)}
+					</CardContent>
+				</Card>
+			)}
 			{rows.isError && <p role="alert">{rows.error.message}</p>}
 			{rows.data?.rows.length === 0 && (
 				<p>Chưa có dữ liệu nguồn đã xác minh.</p>
@@ -58,6 +200,8 @@ export function CareCustomers({
 						customer={customer}
 						canManage={canManage}
 						canResolve={canManage || customer.ownerId === userId}
+						selected={selected.includes(customer.id)}
+						onToggle={() => toggle(customer.id)}
 					/>
 				))}
 			</div>
@@ -88,10 +232,14 @@ function CustomerCard({
 	customer,
 	canManage,
 	canResolve,
+	selected,
+	onToggle,
 }: {
 	customer: Customer;
 	canManage: boolean;
 	canResolve: boolean;
+	selected: boolean;
+	onToggle: () => void;
 }) {
 	const trpc = useTRPC();
 	const cache = useCrmCache();
@@ -124,6 +272,17 @@ function CustomerCard({
 				<CardTitle>{customer.name}</CardTitle>
 			</CardHeader>
 			<CardContent>
+				{canManage && (
+					<Button
+						size="touch"
+						variant="outline"
+						aria-pressed={selected}
+						aria-label={`${selected ? "Bỏ chọn" : "Chọn"} ${customer.name} để xem trước pilot`}
+						onClick={onToggle}
+					>
+						{selected ? "Bỏ chọn xem trước" : "Chọn xem trước"}
+					</Button>
+				)}
 				<div className="flex flex-wrap gap-2">
 					<Badge variant="outline">
 						{customer.brand === "UMEHA" ? "UMEHA" : "Li En Sport"}

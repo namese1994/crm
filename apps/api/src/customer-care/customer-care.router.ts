@@ -6,6 +6,8 @@ import {
 	careImport,
 	careListInput,
 	careMetrics,
+	carePilotPreviewInput,
+	carePilotPreviewOutput,
 	careTaskInput,
 	careTemplateApproval,
 	careTemplateInput,
@@ -67,6 +69,14 @@ export class CustomerCareRouter {
 		@Ctx() ctx: AuthedTrpcContext,
 	) {
 		return this.care.configureCustomer(input, ctx.user.id);
+	}
+
+	@Query({ input: carePilotPreviewInput, output: carePilotPreviewOutput })
+	pilotPreview(
+		@Input() input: z.infer<typeof carePilotPreviewInput>,
+		@Ctx() ctx: AuthedTrpcContext,
+	) {
+		return this.care.pilotPreview(input, ctx.user.id);
 	}
 
 	@Mutation({ input: careTaskInput })

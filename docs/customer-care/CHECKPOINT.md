@@ -23,12 +23,13 @@ Cập nhật: 27/10/2026, Asia/Ho_Chi_Minh. Đọc cùng BACKLOG.md, SOURCE-CONT
 - Đã sửa sai selector Radix khiến tabs xếp ngang/tràn vùng main; bốn tab không tràn ở 360px, queue không tràn ở 360/390/412px.
 - Walkthrough dữ liệu mẫu: copy giữ 0 xác nhận; nhân viên bấm xác nhận thì tăng 1 và việc rời queue.
 - 24 template nháp, chỉ hai template DEMO được duyệt trong database demo; không có ưu đãi thật tự đặt.
-- Toàn repo 1.387 test đạt, 0 lỗi (một phần cache package không đổi); CRM riêng 40 ca/133 assertions; lint và anti-slop đạt; kiểm tra kiểu 11 task sau sinh mã đạt; ba build đạt. Xem giới hạn codegen trong VALIDATION.md.
+- Quản lý chọn rõ 1–100 khách ở tab Khách hàng để xem trước pilot. Báo cáo chỉ đọc kiểm tra nguồn, người phụ trách, đơn giao, mốc và mẫu đúng tag; không enroll, tạo task hoặc trả nội dung gửi.
+- Toàn repo 1.390 test đạt, 0 lỗi (một phần cache package không đổi); CRM riêng 43 ca/153 assertions; lint và anti-slop đạt; kiểm tra kiểu 11 task sau sinh mã đạt; ba build đạt. Xem giới hạn codegen trong VALIDATION.md.
 
 ## Môi trường thử nghiệm cục bộ
 
 - Bun chính xác 1.4.0: `.scratch/tooling/bun-linux-x64/bun`; không dùng Bun 1.3.14 cũ trong PATH để cập nhật lockfile.
-- Database `crm_care_demo_test`: demo tổng hợp, ba nhân viên mẫu và một quản lý, sáu khách mẫu. Database `crm_care_test`: test riêng; có dữ liệu demo từ lượt phát triển trước nên không dùng để chạy toàn bộ test membership. Database `crm_care_ci_test`: suite toàn repo, tách demo. Chỉ ghi/xóa fixtures do test sở hữu.
+- Database `crm_care_demo_test`: demo tổng hợp, ba nhân viên mẫu và một quản lý, bảy khách mẫu. Database `crm_care_test`: test riêng; có dữ liệu demo từ lượt phát triển trước nên không dùng để chạy toàn bộ test membership. Database `crm_care_ci_test`: suite toàn repo, tách demo. Chỉ ghi/xóa fixtures do test sở hữu.
 - Root `.env` và session demo chỉ nằm trong đường dẫn bị Git ignore. Không in file/cookie/token.
 - PM2 nằm trong `.scratch/ops/node_modules/pm2`, dùng PM2_HOME `.scratch/pm2` tách biệt. Web 3210, API 3211; HTTPS proxy tự ký 3213 chỉ dành cho browser test trong container, chưa phải URL điện thoại hoặc production.
 - Ba process: crm-web, crm-api, crm-care-worker. API/worker chạy binary Bun trực tiếp với interpreter:none để tránh require() async ESM của PM2.
@@ -54,6 +55,16 @@ Cập nhật: 27/10/2026, Asia/Ho_Chi_Minh. Đọc cùng BACKLOG.md, SOURCE-CONT
 - 15 lỗ hổng dependency đã tồn tại ở baseline. Đã vá bằng override cùng major; bun audit hiện 0 trên 1.074 package. Toàn repo sau vá: 1.387 test đạt, 11 task typecheck đạt sau codegen, lint/anti-slop và ba build đạt.
 - Browser 360px: xử lý khách mẫu chưa có task không tăng số lần gửi; copy → nhận lại → xác nhận thành công, bộ đếm mẫu 1→2; không gửi tin thật, không tràn ngang, console không lỗi.
 - Demo hiện có thêm một khách mẫu phản hồi, đã xử lý qua UI; không tính là pilot. Sau cùng các DB và log vẫn chỉ là môi trường test.
+
+## Xem trước pilot bổ sung 27/10/2026
+
+- Báo cáo chỉ cho quản lý, yêu cầu danh sách ID tường minh, duy nhất, từ 1 đến 100 khách. Không tự chọn khách hoặc thay đổi enrollment.
+- Dùng cùng quy tắc chọn template với đường copy. Chỉ trả tên/phiên bản mẫu đã duyệt, mốc và các lý do chưa đủ điều kiện; không trả nội dung tin.
+- Mốc từng có công việc, kể cả đã hủy khi dừng pilot, được báo cần kiểm tra lịch sử. Không hiển thị sẵn sàng khi khóa chống trùng không cho tạo lại.
+- Review độc lập kiểm lại sửa lỗi trên. Ba ca mới kiểm tra quyền, nguồn lỗi, đơn mới chưa giao, giới hạn chọn và báo cáo không ghi dữ liệu.
+- Browser 360px: chọn một khách mẫu đã trong pilot trả 0/1 đủ điều kiện và đúng lý do. Document/main đều 360px, console 0 lỗi. Trước/sau giữ nguyên 7 khách, 7 enrollment, 7 task, 56 event và 2 xác nhận gửi mẫu.
+- `.scratch/pilot-verification.json`: checks, audit và ba build đều exit 0. `.scratch/pilot-tests.log`: 43 ca/153 assertions. Toàn repo mới nhất: 1.390 test đạt. Không cần chạy lại suite khi chỉ thay tài liệu.
+- D02 vẫn cần nguồn runtime, chính sách, đăng nhập nhân viên và danh sách thật. D03 chưa bắt đầu; không có tin khách thật nào được gửi.
 
 ## Heartbeat
 

@@ -20,7 +20,7 @@ import { companyListInput, companyListOutput, companyIdInput, companyDetailOutpu
 import { contactListInput, contactListOutput, contactIdInput, contactByIdOutput, contactCreateInput, contactBasicOutput, contactUpdateArgs, contactNameOutput, contactEnrichOutput, contactBulkOwnerInput, bulkResultOutput, contactBulkCompanyInput, contactBulkInput, factDecisionInput, decideFactOutput } from "../contacts/contacts.contracts";
 import { conversationListInput, conversationListOutput, builderListOutput, builderResourceSearchInput, builderResourcesOutput, conversationIdInput, builderConversationDetailOutput, conversationEventsInput, conversationEventsOutput, conversationSaveInput, conversationIdOutput, builderConversationCreateInput, builderConversationSubmitInput, builderQuestionResponseInput, builderApprovalResponseInput, builderSessionLimitResponseInput, builderPermissionModeInput, builderResponseRatingInput, builderResponseRatingOutput, conversationShareStatusOutput, conversationShareTokenOutput, sharedConversationInput, sharedConversationOutput } from "../conversations/conversations.contracts";
 import { currencySettingsOutput, setReportingCurrencyInput, setManualRateInput, removeManualRateInput } from "../currency/currency.contracts";
-import { careListInput, careMetrics, careBrand, careCustomerInput, careTaskInput, careCustomerResolution, careActionInput, careTemplateInput, careTemplateApproval, careImport } from "@crm/validation/customer-care";
+import { careListInput, careMetrics, careBrand, careCustomerInput, carePilotPreviewInput, carePilotPreviewOutput, careTaskInput, careCustomerResolution, careActionInput, careTemplateInput, careTemplateApproval, careImport } from "@crm/validation/customer-care";
 import { dashboardSummaryInput, dashboardSummaryOutput } from "../dashboard/dashboard.contracts";
 import { dealListInput, dealListOutput, dealIdInput, dealDetailOutput, dealCreateInput, dealCreateOutput, dealUpdateArgs, dealMutateOutput, setStageInput, dealSetStageOutput, dealContactsInput, dealContactOptionsOutput, dealAttachContactInput, dealContactLinkOutput, dealDetachContactInput, dealContactRoleInput, dealContactRoleOutput, dealBulkOwnerInput, dealBulkResultOutput, dealBulkStageInput, dealBulkInput } from "../deals/deals.contracts";
 import { enrichmentQueueInput } from "@crm/validation/enrichment-queue";
@@ -398,6 +398,10 @@ const appRouter = t.router({
     configureCustomer: publicProcedure
       .input(careCustomerInput)
       .mutation(async () => "PLACEHOLDER_DO_NOT_REMOVE" as unknown as Awaited<ReturnType<CustomerCareRouter["configureCustomer"]>>),
+    pilotPreview: publicProcedure
+      .input(carePilotPreviewInput)
+      .output(carePilotPreviewOutput)
+      .query(async () => "PLACEHOLDER_DO_NOT_REMOVE" as any),
     claim: publicProcedure
       .input(careTaskInput)
       .mutation(async () => "PLACEHOLDER_DO_NOT_REMOVE" as unknown as Awaited<ReturnType<CustomerCareRouter["claim"]>>),

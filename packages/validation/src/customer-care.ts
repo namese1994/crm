@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 export const careBrand = z.enum(["UMEHA", "LI_EN_SPORT"]);
+export const CARE_PILOT_LIMIT = 100;
 const careCount = z.number().int().nonnegative();
 const careRate = z.number().min(0).max(1).nullable();
 export const careMetrics = z.object({
@@ -69,6 +70,47 @@ export const careResult = z.enum([
 	"RESOLVED",
 ]);
 const sourceId = z.string().min(1).max(160);
+export const carePilotPreviewInput = z.object({
+	ids: z
+		.array(sourceId)
+		.min(1)
+		.max(CARE_PILOT_LIMIT)
+		.refine(
+			(ids) => new Set(ids).size === ids.length,
+			"Danh sách khách bị trùng",
+		),
+});
+export const carePilotPreviewOutput = z.object({
+	readOnly: z.literal(true),
+	generatedAt: z.date(),
+	ready: careCount,
+	rows: z
+		.array(
+			z.object({
+				id: sourceId,
+				name: z.string(),
+				brand: careBrand,
+				eligible: z.boolean(),
+				reasons: z.array(z.string()),
+				enrolled: z.boolean(),
+				deliveredAt: z.date().nullable(),
+				milestone: z.number().int().nullable(),
+				dueAt: z.date().nullable(),
+				sourceCheckedAt: z.date(),
+				activityCheckedAt: z.date().nullable(),
+				channelRestricted: z.boolean(),
+				template: z
+					.object({
+						id: sourceId,
+						name: z.string(),
+						version: z.number().int().positive(),
+					})
+					.nullable(),
+			}),
+		)
+		.max(CARE_PILOT_LIMIT),
+});
+export type CarePilotPreview = z.infer<typeof carePilotPreviewOutput>;
 export const careSourceLease = z.object({ id: sourceId, token: sourceId });
 export type CareSourceLease = z.infer<typeof careSourceLease>;
 const instant = z.iso.datetime({ offset: true });
@@ -169,6 +211,7 @@ export type CareTemplateInput = z.infer<typeof careTemplateInput>;
 export type CareActionInput = z.infer<typeof careActionInput>;
 
 export const CARE = {
+	pilotPreviewLimit: CARE_PILOT_LIMIT,
 	dayMs: 86_400_000,
 	leaseMs: 30 * 60_000,
 	freshMs: 30 * 60_000,

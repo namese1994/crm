@@ -52,8 +52,11 @@ Keep demo and automated tests in separate databases. The synthetic helper uses D
 1. Verify actual source identity, delivery history and message activity.
 2. Configure employee sign-in and manager roles.
 3. Approve the business policy and template versions.
-4. Review eligible candidates and explicitly enroll 50–100.
-5. Observe employee use on real Android devices for approximately two weeks.
-6. Reconcile manual confirmations against platform history where available.
+4. As a manager, open **Khách hàng**. Select each intended candidate using **Chọn xem trước**. Selection starts empty and accepts 1–100 unique customers per report. Selection persists across list pages within the current screen.
+5. Select **Xem trước điều kiện**. Review blockers, verified delivery, D+x, approved template version and source check times. The report reads current stored data. It does not refresh external sources, enroll customers, create tasks or return message text.
+6. Resolve each blocker through the normal customer/source workflow. A milestone with an existing task remains occupied, including a cancelled task. Check history instead of resetting records. A Pancake API restriction remains visible for staff review.
+7. Recheck the report after source or policy changes. Explicitly enroll each reviewed customer at their profile. The report is a snapshot; normal eligibility checks still apply. Target 50–100 real customers only after access, source and policy verification.
+8. Observe employee use on real Android devices for approximately two weeks.
+9. Reconcile manual confirmations against platform history where available.
 
 Code tests and a synthetic browser walkthrough do not complete the real pilot. Keep the heartbeat active until D03 has observed evidence.

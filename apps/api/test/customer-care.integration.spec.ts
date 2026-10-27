@@ -58,6 +58,30 @@ async function enrolled(key: string) {
 	});
 }
 
+test("an enrolled customer without an assignee gets no new task until assigned", async () => {
+	const imported = await service.importOrder(
+		fixture("unassigned"),
+		manager,
+		now,
+	);
+	await service.configureCustomer(
+		{ id: imported.customerId, enrolled: true, ownerId: null, tags: [] },
+		manager,
+	);
+	await service.tick(now);
+	expect(
+		await db.careTask.count({ where: { customerId: imported.customerId } }),
+	).toBe(0);
+	await service.configureCustomer(
+		{ id: imported.customerId, enrolled: true, ownerId: actor, tags: [] },
+		manager,
+	);
+	await service.tick(now);
+	expect(
+		await db.careTask.count({ where: { customerId: imported.customerId } }),
+	).toBe(1);
+});
+
 test("customer search and filters cover the whole result set with stable pagination", async () => {
 	const marker = `${prefix}-lookup`;
 	await db.careCustomer.createMany({

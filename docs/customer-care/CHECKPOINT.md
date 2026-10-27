@@ -4,6 +4,8 @@ Cập nhật: 27/10/2026, Asia/Ho_Chi_Minh. Đọc cùng BACKLOG.md, SOURCE-CONT
 
 ## Cải thiện khả dụng và QA độc lập 28/10/2026
 
+- Bổ sung cảnh báo rõ cho khách đã vào pilot nhưng chưa phân công: không tạo việc mới; quản lý được hướng dẫn phân công, nhân viên được hướng dẫn nhờ quản lý. Test synthetic xác nhận trước phân công 0 việc, sau phân công và tick 1 việc. QA độc lập kiểm fixture 360px cho cả hai vai trò (15/15 mỗi vai trò); không có gửi tin hoặc thay dữ liệu thật. Chưa triển khai.
+- Thử build Next tách biệt giới hạn 1 CPU và heap 768 MB: không hoàn tất trong thời gian giới hạn; gateway và URL thử nghiệm tạm không đáp ứng trong lúc build, sau đó URL trả HTTP 200 và các process CRM online. Không chạy lại build nặng trên host đang dùng cho tới khi xác định năng lực tài nguyên hoặc có môi trường build riêng; không suy ra build pass. Không thay PM2, DB hoặc source thật.
 - Nam yêu cầu tiếp tục cải thiện, kiểm thử và review độc lập; heartbeat `ho-n-t-t-crm-ch-m-s-c-kh-ch-a-d` đã bật lại mỗi giờ. Không tự gửi, enroll hay duyệt khách thật; không sửa size.
 - Thực tế đã có khách được người dùng đưa vào pilot; không dùng số 0 enrolled của snapshot cũ làm trạng thái hiện tại. Giữ nguyên dữ liệu đang có.
 - Đã thêm tìm theo tên/mã POSCake, lọc brand và trạng thái pilot phía server, phân trang ổn định; giữ lựa chọn ẩn và có cảnh báo. Test synthetic 35 khách và ký tự %/_ đạt. Review tĩnh độc lập không thấy lỗi chặn; fixture React/tRPC giả với đúng source chạy tìm, lọc, đổi trang, giữ/bỏ chọn ở Chromium 360/1280 không tràn và không pageerror. Test do QA độc lập soạn, sau đó sửa locator checkbox thành button và chạy lại; không thay cho Next app thật.

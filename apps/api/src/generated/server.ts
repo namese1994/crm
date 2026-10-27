@@ -21,7 +21,7 @@ import { contactListInput, contactListOutput, contactIdInput, contactByIdOutput,
 import { conversationListInput, conversationListOutput, builderListOutput, builderResourceSearchInput, builderResourcesOutput, conversationIdInput, builderConversationDetailOutput, conversationEventsInput, conversationEventsOutput, conversationSaveInput, conversationIdOutput, builderConversationCreateInput, builderConversationSubmitInput, builderQuestionResponseInput, builderApprovalResponseInput, builderSessionLimitResponseInput, builderPermissionModeInput, builderResponseRatingInput, builderResponseRatingOutput, conversationShareStatusOutput, conversationShareTokenOutput, sharedConversationInput, sharedConversationOutput } from "../conversations/conversations.contracts";
 import { currencySettingsOutput, setReportingCurrencyInput, setManualRateInput, removeManualRateInput } from "../currency/currency.contracts";
 import { careIntegrationStatus, careSourceSave, careIntegrationPublic, careAiSave, careIntegrationAction, careIntegrationToggle, CARE_INTEGRATIONS, careJobState, careAiRequest, careAiJobPublic } from "@crm/validation/care-integrations";
-import { careListInput, careMetrics, careBrand, careCustomerInput, carePilotPreviewInput, carePilotPreviewOutput, careTaskInput, careCustomerResolution, careActionInput, careTemplateInput, careTemplateApproval, careImport } from "@crm/validation/customer-care";
+import { careListInput, careMetrics, careCustomerListInput, careCustomerInput, carePilotPreviewInput, carePilotPreviewOutput, careTaskInput, careCustomerResolution, careActionInput, careBrand, careTemplateInput, careTemplateApproval, careImport } from "@crm/validation/customer-care";
 import { dashboardSummaryInput, dashboardSummaryOutput } from "../dashboard/dashboard.contracts";
 import { dealListInput, dealListOutput, dealIdInput, dealDetailOutput, dealCreateInput, dealCreateOutput, dealUpdateArgs, dealMutateOutput, setStageInput, dealSetStageOutput, dealContactsInput, dealContactOptionsOutput, dealAttachContactInput, dealContactLinkOutput, dealDetachContactInput, dealContactRoleInput, dealContactRoleOutput, dealBulkOwnerInput, dealBulkResultOutput, dealBulkStageInput, dealBulkInput } from "../deals/deals.contracts";
 import { enrichmentQueueInput } from "@crm/validation/enrichment-queue";
@@ -402,10 +402,24 @@ const appRouter = t.router({
       .output(careIntegrationPublic.nullable())
       .mutation(async () => "PLACEHOLDER_DO_NOT_REMOVE" as any),
     webhookInfo: publicProcedure
-      .output(z.object({ url: z.url(), header: z.literal(CARE_INTEGRATIONS.webhookHeader), key: z.string() }))
+      .output(z.object({
+			url: z.url(),
+			header: z.literal(CARE_INTEGRATIONS.webhookHeader),
+			key: z.string(),
+		}))
       .mutation(async () => "PLACEHOLDER_DO_NOT_REMOVE" as any),
     receipts: publicProcedure
-      .output(z.array(z.object({ id: z.string(), orderId: z.string(), state: careJobState, attempts: z.number(), lastError: z.string().nullable(), receivedAt: z.date(), finishedAt: z.date().nullable() })))
+      .output(z.array(
+			z.object({
+				id: z.string(),
+				orderId: z.string(),
+				state: careJobState,
+				attempts: z.number(),
+				lastError: z.string().nullable(),
+				receivedAt: z.date(),
+				finishedAt: z.date().nullable(),
+			}),
+		))
       .query(async () => "PLACEHOLDER_DO_NOT_REMOVE" as any),
     requestAi: publicProcedure
       .input(careAiRequest)
@@ -429,10 +443,7 @@ const appRouter = t.router({
       .output(careMetrics)
       .query(async () => "PLACEHOLDER_DO_NOT_REMOVE" as any),
     customers: publicProcedure
-      .input(z.object({
-			brand: careBrand.optional(),
-			page: z.number().int().min(1).default(1),
-		}))
+      .input(careCustomerListInput)
       .query(async () => "PLACEHOLDER_DO_NOT_REMOVE" as unknown as Awaited<ReturnType<CustomerCareRouter["customers"]>>),
     configureCustomer: publicProcedure
       .input(careCustomerInput)

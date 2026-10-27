@@ -75,6 +75,18 @@ export function CareBoard({ userId }: { userId: string }) {
 	const trpc = useTRPC();
 	const cache = useCrmCache();
 	const workspaceUrl = useWorkspaceUrl();
+	const [activeTab, setActiveTab] = useState("queue");
+	const [showGuide, setShowGuide] = useState(true);
+	const openTab = (tab: string) => {
+		setActiveTab(tab);
+		requestAnimationFrame(() => {
+			const tabs = document.getElementById("care-tabs");
+			tabs?.scrollIntoView({ block: "start" });
+			tabs
+				?.querySelector<HTMLElement>('[role="tab"][data-state="active"]')
+				?.focus({ preventScroll: true });
+		});
+	};
 	const [brand, setBrand] = useState<"ALL" | "UMEHA" | "LI_EN_SPORT">("ALL");
 	const [state, setState] = useState<"ACTIVE" | "WAITING" | "DONE" | "ALL">(
 		"ACTIVE",
@@ -164,8 +176,73 @@ export function CareBoard({ userId }: { userId: string }) {
 					{summary.data?.sentManual ?? "—"} nhân viên xác nhận gửi
 				</Badge>
 			</div>
-			<Tabs defaultValue="queue" touch>
-				<TabsList>
+			<Card>
+				<CardHeader className="flex flex-row flex-wrap items-center justify-between gap-2">
+					<CardTitle>Bắt đầu chăm sóc khách</CardTitle>
+					<Button
+						size="touch"
+						variant="outline"
+						aria-expanded={showGuide}
+						aria-controls={showGuide ? "care-guide" : undefined}
+						onClick={() => setShowGuide(!showGuide)}
+					>
+						{showGuide ? "Ẩn hướng dẫn" : "Xem hướng dẫn"}
+					</Button>
+				</CardHeader>
+				{showGuide && (
+					<CardContent id="care-guide" className="space-y-3">
+						<p>
+							Thử với một khách trước. Lịch tính từ ngày giao thành công; hệ
+							thống không tự gửi tin.
+						</p>
+						<ol className="list-decimal space-y-2 pl-5">
+							<li>
+								{summary.data?.canManage
+									? "Tạo và duyệt mẫu trong Nội dung."
+									: "Nhờ quản lý tạo và duyệt mẫu trong Nội dung."}
+							</li>
+							<li>
+								{summary.data?.canManage
+									? "Trong Khách hàng, xem điều kiện, chọn người phụ trách và đưa khách vào pilot khi đã sẵn sàng."
+									: "Nhờ quản lý chọn khách thử và phân công người phụ trách."}
+							</li>
+							<li>
+								Trong Hôm nay, kiểm tra lịch, nhận việc, copy nội dung, mở
+								Pancake và ghi kết quả thực tế.
+							</li>
+						</ol>
+						<div className="flex flex-wrap gap-2">
+							<Button
+								size="touch"
+								variant="outline"
+								onClick={() => openTab("templates")}
+							>
+								Mở Nội dung
+							</Button>
+							<Button
+								size="touch"
+								variant="outline"
+								onClick={() => openTab("customers")}
+							>
+								Mở Khách hàng
+							</Button>
+							<Button
+								size="touch"
+								variant="outline"
+								onClick={() => openTab("queue")}
+							>
+								Mở Hôm nay
+							</Button>
+						</div>
+						<p className="text-sm text-muted-foreground">
+							Mẫu cần người quản lý duyệt. Copy chưa có nghĩa là đã gửi; chỉ xác
+							nhận sau khi nhân viên thực sự gửi.
+						</p>
+					</CardContent>
+				)}
+			</Card>
+			<Tabs id="care-tabs" value={activeTab} onValueChange={setActiveTab} touch>
+				<TabsList className="max-w-full overflow-x-auto justify-start">
 					<TabsTrigger value="queue">Hôm nay</TabsTrigger>
 					<TabsTrigger value="customers">Khách hàng</TabsTrigger>
 					<TabsTrigger value="templates">Nội dung</TabsTrigger>

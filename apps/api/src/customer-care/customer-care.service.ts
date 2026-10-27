@@ -6,6 +6,7 @@ import {
 import { type Db, Prisma } from "@crm/db";
 import type {
 	careCustomerInput,
+	careCustomerListInput,
 	careListInput,
 } from "@crm/validation/customer-care";
 import {
@@ -108,13 +109,25 @@ export class CustomerCareService {
 		};
 	}
 
-	async customers(brand?: "UMEHA" | "LI_EN_SPORT", page = 1) {
-		const where = brand ? { brand } : {};
+	async customers(input: z.infer<typeof careCustomerListInput>) {
+		const search = input.search?.replace(/[\\%_]/g, "\\$&");
+		const where: Prisma.CareCustomerWhereInput = {
+			brand: input.brand,
+			enrolled: input.enrolled,
+			OR: search
+				? [
+						{ name: { contains: search, mode: "insensitive" } },
+						{
+							sourceCustomerId: { contains: search, mode: "insensitive" },
+						},
+					]
+				: undefined,
+		};
 		const [rows, total] = await Promise.all([
 			this.db.careCustomer.findMany({
 				where,
-				orderBy: { updatedAt: "desc" },
-				skip: (page - 1) * CARE.pageSize,
+				orderBy: [{ updatedAt: "desc" }, { id: "asc" }],
+				skip: (input.page - 1) * CARE.pageSize,
 				take: CARE.pageSize,
 				select: {
 					id: true,
@@ -145,6 +158,7 @@ export class CustomerCareService {
 				latestInboundAt: this.latestInboundAt(customer),
 			})),
 			total,
+			pageSize: CARE.pageSize,
 		};
 	}
 

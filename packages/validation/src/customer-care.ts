@@ -174,6 +174,13 @@ export const careTemplateInput = z.object({
 	validUntil: instant.nullable(),
 });
 
+export const careCustomerListInput = z.object({
+	brand: careBrand.optional(),
+	page: z.number().int().min(1).max(10000).default(1),
+	search: z.string().trim().max(100).optional(),
+	enrolled: z.boolean().optional(),
+});
+
 export const careListInput = z.object({
 	brand: careBrand.optional(),
 	mine: z.boolean().default(true),

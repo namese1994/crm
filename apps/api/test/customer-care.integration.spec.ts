@@ -2,6 +2,8 @@ import "reflect-metadata";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { db } from "@crm/db";
 import type { CareImport } from "@crm/validation/customer-care";
+import type { MiddlewareOptions } from "nestjs-trpc";
+import { CareMembershipMiddleware } from "../src/customer-care/care-membership.middleware";
 import { CustomerCareService } from "../src/customer-care/customer-care.service";
 
 const service = new CustomerCareService(db);
@@ -55,6 +57,78 @@ async function enrolled(key: string) {
 		where: { customerId: imported.customerId },
 	});
 }
+
+test("customer search and filters cover the whole result set with stable pagination", async () => {
+	const marker = `${prefix}-lookup`;
+	await db.careCustomer.createMany({
+		data: Array.from({ length: 35 }, (_, index) => ({
+			brand: index < 20 ? ("UMEHA" as const) : ("LI_EN_SPORT" as const),
+			shopId: "test-shop",
+			sourceCustomerId: `${marker}-${index}`,
+			name: `Khách ${marker}`,
+			enrolled: index % 2 === 0,
+			syncedAt: now,
+		})),
+	});
+	const first = await service.customers({ search: marker, page: 1 });
+	const second = await service.customers({ search: marker, page: 2 });
+	expect(first.total).toBe(35);
+	expect(first.rows).toHaveLength(first.pageSize);
+	expect(second.rows).toHaveLength(35 - first.pageSize);
+	expect(
+		new Set([...first.rows, ...second.rows].map((row) => row.id)).size,
+	).toBe(35);
+	const filtered = await service.customers({
+		search: marker.toUpperCase(),
+		brand: "UMEHA",
+		enrolled: true,
+		page: 1,
+	});
+	expect(filtered.total).toBe(10);
+	expect(
+		filtered.rows.every((row) => row.brand === "UMEHA" && row.enrolled),
+	).toBe(true);
+	const byId = await service.customers({ search: `${marker}-34`, page: 1 });
+	expect(byId.total).toBe(1);
+	await db.careCustomer.createMany({
+		data: ["%", "_", "X"].map((suffix) => ({
+			brand: "UMEHA" as const,
+			shopId: "test-shop",
+			sourceCustomerId: `${marker}-literal-${suffix}`,
+			name: `Khách ${marker}${suffix}`,
+			syncedAt: now,
+		})),
+	});
+	expect(
+		(await service.customers({ search: `${marker}%`, page: 1 })).total,
+	).toBe(1);
+	expect(
+		(await service.customers({ search: `${marker}_`, page: 1 })).total,
+	).toBe(1);
+});
+
+test("care membership guard denies a valid session without workspace membership", async () => {
+	const guard = new CareMembershipMiddleware(db);
+	let invoked = false;
+	const options = (userId: string) =>
+		({
+			ctx: { session: { user: { id: userId } } },
+			next: async () => {
+				invoked = true;
+				return { ok: true };
+			},
+		}) as unknown as MiddlewareOptions;
+	await guard.use(options(actor));
+	expect(invoked).toBe(true);
+	invoked = false;
+	await expect(
+		guard.use(options(`${prefix}-not-member`)),
+	).rejects.toMatchObject({ code: "FORBIDDEN" });
+	expect(invoked).toBe(false);
+	await expect(
+		guard.use({ ctx: { session: null } } as unknown as MiddlewareOptions),
+	).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+});
 
 beforeAll(async () => {
 	if (!new URL(process.env.TEST_DATABASE_URL ?? "").pathname.endsWith("_test"))

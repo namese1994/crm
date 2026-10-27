@@ -2,6 +2,18 @@
 
 Cập nhật: 27/10/2026, Asia/Ho_Chi_Minh. Đọc cùng BACKLOG.md, SOURCE-CONTRACTS.md, SCENARIOS.md và VALIDATION.md.
 
+## Cải thiện khả dụng và QA độc lập 28/10/2026
+
+- Nam yêu cầu tiếp tục cải thiện, kiểm thử và review độc lập; heartbeat `ho-n-t-t-crm-ch-m-s-c-kh-ch-a-d` đã bật lại mỗi giờ. Không tự gửi, enroll hay duyệt khách thật; không sửa size.
+- Thực tế đã có khách được người dùng đưa vào pilot; không dùng số 0 enrolled của snapshot cũ làm trạng thái hiện tại. Giữ nguyên dữ liệu đang có.
+- Đã thêm tìm theo tên/mã POSCake, lọc brand và trạng thái pilot phía server, phân trang ổn định; giữ lựa chọn ẩn và có cảnh báo. Test synthetic 35 khách và ký tự %/_ đạt. Review tĩnh độc lập không thấy lỗi chặn; fixture React/tRPC giả với đúng source chạy tìm, lọc, đổi trang, giữ/bỏ chọn ở Chromium 360/1280 không tràn và không pageerror. Test do QA độc lập soạn, sau đó sửa locator checkbox thành button và chạy lại; không thay cho Next app thật.
+- Đã thêm kiểm tra membership cho cả hai router care; test synthetic ở lớp middleware đạt; QA độc lập kiểm HTTP/DI cả hai router: member 200, sau khi xóa membership của user mẫu, cùng session nhận 403. Đăng nhập lại có thể tự phục hồi membership theo auth gốc, chưa chứng minh thu hồi quyền hoàn chỉnh.
+- API care integration 29 ca/102 assertions, typecheck 11 task và lint 10 task đạt. Next dev cô lập bị SIGKILL khi compile PostCSS, chưa có QA browser; không suy ra production pass. Chưa build/deploy bản mới.
+- Đã bổ sung hướng dẫn 3 bước và nút mở từng tab trong care-board, cuộn/focus khi chuyển tab. Typecheck 11 task và lint 10 task đạt. Review mã độc lập đã thực hiện; chưa có bằng chứng browser cho bản mới, chưa build hoặc triển khai bản này vào PM2.
+- QA độc lập quan sát màn thật: xem trước điều kiện chạy, 30 khách/trang, không có tìm kiếm/lọc theo brand hoặc trạng thái; ưu tiên thiết kế tìm kiếm phía server, phân trang đúng và kiểm thử. Li En Sport vẫn có cảnh báo đồng bộ.
+- Kiến trúc hiện tại dùng một workspace và cấu hình care toàn cục; chưa đủ cơ sở bán SaaS chung nhiều khách hàng. Cần thiết kế và kiểm thử cách ly theo tenant, hoặc phương án mỗi khách một DB riêng trước khi thương mại hóa. Chưa chứng minh lộ dữ liệu giữa tenant đang chạy.
+- Tiếp tục: kiểm thử UI mới ở môi trường cách ly, kiểm thử mobile và bàn phím, review độc lập sau sửa, rồi cân nhắc triển khai staging không làm gián đoạn người dùng. Tiếp tục chứng nhận tìm kiếm/lọc trên Next app và kiểm tra quyền thành viên hết hiệu lực: review tĩnh thấy care read dùng session, cần thử synthetic sau khi xóa membership; chưa xác nhận lỗi runtime. QA đề xuất dùng DB giả lập riêng, API/Next cổng riêng, không dùng worker nguồn hoặc DB staging. Không xem QA giả lập là pilot thật.
+
 ## Repo và phạm vi
 
 - Fork: https://github.com/namese1994/crm, branch `codex/customer-care`.

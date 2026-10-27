@@ -2,6 +2,7 @@ import {
 	careActionInput,
 	careBrand,
 	careCustomerInput,
+	careCustomerListInput,
 	careCustomerResolution,
 	careImport,
 	careListInput,
@@ -24,10 +25,11 @@ import {
 import { z } from "zod";
 import type { AuthedTrpcContext } from "../trpc/context.types";
 import { AuthMiddleware } from "../trpc/middlewares/auth.middleware";
+import { CareMembershipMiddleware } from "./care-membership.middleware";
 import { CustomerCareService } from "./customer-care.service";
 
 @Router({ alias: "care" })
-@UseMiddlewares(AuthMiddleware)
+@UseMiddlewares(AuthMiddleware, CareMembershipMiddleware)
 export class CustomerCareRouter {
 	constructor(
 		@Inject(CustomerCareService) private readonly care: CustomerCareService,
@@ -51,16 +53,9 @@ export class CustomerCareRouter {
 		return this.care.metrics();
 	}
 
-	@Query({
-		input: z.object({
-			brand: careBrand.optional(),
-			page: z.number().int().min(1).default(1),
-		}),
-	})
-	customers(
-		@Input() input: { brand?: z.infer<typeof careBrand>; page: number },
-	) {
-		return this.care.customers(input.brand, input.page);
+	@Query({ input: careCustomerListInput })
+	customers(@Input() input: z.infer<typeof careCustomerListInput>) {
+		return this.care.customers(input);
 	}
 
 	@Mutation({ input: careCustomerInput })

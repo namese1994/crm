@@ -23,9 +23,10 @@ import { z } from "zod";
 import type { AuthedTrpcContext } from "../trpc/context.types";
 import { AuthMiddleware } from "../trpc/middlewares/auth.middleware";
 import { CareIntegrationsService } from "./care-integrations.service";
+import { CareMembershipMiddleware } from "./care-membership.middleware";
 
 @Router({ alias: "careIntegrations" })
-@UseMiddlewares(AuthMiddleware)
+@UseMiddlewares(AuthMiddleware, CareMembershipMiddleware)
 export class CareIntegrationsRouter {
 	constructor(
 		@Inject(CareIntegrationsService)

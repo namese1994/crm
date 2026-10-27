@@ -39,8 +39,19 @@ export function CareCustomers({
 }) {
 	const trpc = useTRPC();
 	const [page, setPage] = useState(1);
+	const [searchDraft, setSearchDraft] = useState("");
+	const [search, setSearch] = useState("");
+	const [brand, setBrand] = useState<"ALL" | "UMEHA" | "LI_EN_SPORT">("ALL");
+	const [enrollment, setEnrollment] = useState<"ALL" | "YES" | "NO">("ALL");
 	const [selected, setSelected] = useState<string[]>([]);
-	const rows = useQuery(trpc.care.customers.queryOptions({ page }));
+	const rows = useQuery(
+		trpc.care.customers.queryOptions({
+			page,
+			search: search || undefined,
+			brand: brand === "ALL" ? undefined : brand,
+			enrolled: enrollment === "ALL" ? undefined : enrollment === "YES",
+		}),
+	);
 	const preview = useQuery({
 		...trpc.care.pilotPreview.queryOptions({ ids: selected }),
 		enabled: false,
@@ -63,6 +74,82 @@ export function CareCustomers({
 					Tên và mã SKU giữ theo nguồn.
 				</AlertDescription>
 			</Alert>
+			<form
+				className="flex flex-wrap items-end gap-3"
+				onSubmit={(event) => {
+					event.preventDefault();
+					setPage(1);
+					setSearch(searchDraft.trim());
+				}}
+			>
+				<Field className="min-w-0 flex-1">
+					<FieldLabel htmlFor="care-customer-search">
+						Tìm theo tên hoặc mã khách POSCake
+					</FieldLabel>
+					<Input
+						id="care-customer-search"
+						value={searchDraft}
+						maxLength={100}
+						onChange={(event) => setSearchDraft(event.target.value)}
+					/>
+				</Field>
+				<Button size="touch" type="submit">
+					Tìm khách
+				</Button>
+				<Button
+					size="touch"
+					type="button"
+					variant="outline"
+					onClick={() => {
+						setSearchDraft("");
+						setSearch("");
+						setBrand("ALL");
+						setEnrollment("ALL");
+						setPage(1);
+					}}
+				>
+					Xóa bộ lọc
+				</Button>
+			</form>
+			<div className="flex flex-wrap gap-3">
+				<Select
+					value={brand}
+					onValueChange={(value) => {
+						setBrand(value as typeof brand);
+						setPage(1);
+					}}
+				>
+					<SelectTrigger size="touch" aria-label="Lọc khách theo thương hiệu">
+						<SelectValue />
+					</SelectTrigger>
+					<SelectContent>
+						<SelectGroup>
+							<SelectItem value="ALL">Cả hai thương hiệu</SelectItem>
+							<SelectItem value="UMEHA">UMEHA</SelectItem>
+							<SelectItem value="LI_EN_SPORT">Li En Sport</SelectItem>
+						</SelectGroup>
+					</SelectContent>
+				</Select>
+				<Select
+					value={enrollment}
+					onValueChange={(value) => {
+						setEnrollment(value as typeof enrollment);
+						setPage(1);
+					}}
+				>
+					<SelectTrigger size="touch" aria-label="Lọc theo trạng thái pilot">
+						<SelectValue />
+					</SelectTrigger>
+					<SelectContent>
+						<SelectGroup>
+							<SelectItem value="ALL">Tất cả khách</SelectItem>
+							<SelectItem value="YES">Trong pilot</SelectItem>
+							<SelectItem value="NO">Chưa vào pilot</SelectItem>
+						</SelectGroup>
+					</SelectContent>
+				</Select>
+			</div>
+			{rows.data && <p role="status">{rows.data.total} khách phù hợp</p>}
 			{canManage && (
 				<Card>
 					<CardHeader>
@@ -73,6 +160,10 @@ export function CareCustomers({
 							Chọn khách ở các hồ sơ bên dưới, tối đa {previewLimit} khách mỗi
 							lượt. Dùng báo cáo để rà soát trước khi đưa từng khách vào pilot ở
 							hồ sơ.
+						</p>
+						<p>
+							Khách đã chọn vẫn được giữ khi đổi trang hoặc bộ lọc, kể cả khi
+							không còn hiển thị. Dùng Bỏ chọn tất cả để bắt đầu lại.
 						</p>
 						<div className="flex flex-wrap gap-2">
 							<Badge variant="outline">
@@ -191,7 +282,9 @@ export function CareCustomers({
 			)}
 			{rows.isError && <p role="alert">{rows.error.message}</p>}
 			{rows.data?.rows.length === 0 && (
-				<p>Chưa có dữ liệu nguồn đã xác minh.</p>
+				<p>
+					Không tìm thấy khách phù hợp. Hãy kiểm tra từ khóa hoặc xóa bộ lọc.
+				</p>
 			)}
 			<div className="grid min-w-0 grid-cols-1 gap-4 lg:grid-cols-2">
 				{rows.data?.rows.map((customer) => (
@@ -218,7 +311,7 @@ export function CareCustomers({
 				<Button
 					size="touch"
 					variant="outline"
-					disabled={!rows.data || page * 30 >= rows.data.total}
+					disabled={!rows.data || page * rows.data.pageSize >= rows.data.total}
 					onClick={() => setPage(page + 1)}
 				>
 					Trang sau

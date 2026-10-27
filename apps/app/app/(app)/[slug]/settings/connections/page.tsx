@@ -66,6 +66,14 @@ async function ConnectionsSettingsPageContent({
 		];
 	});
 	const rows = [
+		{
+			name: "POSCake & Pancake",
+			status: "Nguồn chăm sóc khách hàng",
+			bringsIn: "Đơn hàng, giao hàng và hoạt động hội thoại",
+			sends: "Không gửi tin hoặc sửa đơn hàng",
+			href: `/${slug}/settings/connections/poscake`,
+			mark: <span aria-hidden="true">P</span>,
+		},
 		...(google.linked
 			? [
 					{

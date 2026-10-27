@@ -19,3 +19,7 @@
 - PM2 quản lý web, API, worker, tunnel và job nguồn mẫu. Chưa nghiệm thu tự phục hồi sau reboot host/container. Không seed lại hoặc reset database trong lúc người dùng đang thử.
 
 Không có tin khách nào được gửi bởi ứng dụng. Pilot thật D02/D03 vẫn mở. Không tính hoạt động trên chín hồ sơ mẫu là sử dụng thực tế.
+
+## E/F setup additions
+
+Source settings, webhook inbox and the **Trợ lý AI** tab run in staging and pass technical validation; see VALIDATION.md. Read [SETTINGS-AND-WEBHOOK.md](SETTINGS-AND-WEBHOOK.md) before configuring them. Model connection probes call the provider and can incur charges. Real credentials, model compatibility, business policy approval and D02/D03 acceptance remain unverified.

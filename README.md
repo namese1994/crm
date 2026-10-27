@@ -392,6 +392,12 @@ redirect URIs. Set `CRON_SECRET` and point a scheduler at
 the generator needs a newer GLIBC than most build images have. Regenerate locally and
 commit it with the router change that caused it.
 
+## Post-purchase customer care
+
+The fork adds manual customer care, POSCake/Pancake source settings, a durable webhook inbox and a read-only AI assistant. Start with [the PM2 runbook](docs/customer-care/RUNBOOK.md) and [the source/AI setup guide](docs/customer-care/SETTINGS-AND-WEBHOOK.md). See [validation and limits](docs/customer-care/VALIDATION.md) before connecting real data.
+
+The preferred checkout is `Y:\AI_Workspace\apps\crm`, also mounted at `/workspace/apps/crm`. Store secrets only in the root `.env`. Git includes source, migrations, generated tRPC contracts, tests and deployment configuration. Build outputs and private runtime files stay untracked.
+
 ## Contributing
 
 We'd rather have a paragraph you wrote than a pull request an agent wrote. See

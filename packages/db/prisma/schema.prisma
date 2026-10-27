@@ -2,6 +2,87 @@ datasource db {
   provider = "postgresql"
 }
 
+enum CareIntegrationKind {
+  POSCAKE
+  LLM
+}
+
+enum CareJobState {
+  PENDING
+  RUNNING
+  DONE
+  FAILED
+  IGNORED
+}
+
+model CareIntegration {
+  id               String @id
+  kind             CareIntegrationKind @unique
+  name             String
+  config           Json
+  secrets          String
+  version          Int @default(1)
+  enabled          Boolean @default(false)
+  checkedVersion   Int?
+  checkRequestedAt DateTime?
+  lastCheckedAt    DateTime?
+  lastError        String?
+  lastWebhookAt    DateTime?
+  createdBy        String
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  webhooks         CareWebhookReceipt[]
+  aiJobs           CareAiJob[]
+
+  @@map("careIntegration")
+}
+
+model CareWebhookReceipt {
+  id            String @id @default(cuid())
+  integrationId String
+  integration   CareIntegration @relation(fields: [integrationId], references: [id], onDelete: Restrict)
+  eventKey      String
+  eventType     String
+  shopId        String
+  orderId       String
+  state         CareJobState @default(PENDING)
+  attempts      Int @default(0)
+  nextAttemptAt DateTime @default(now())
+  leaseToken    String?
+  leaseUntil    DateTime?
+  lastError     String?
+  receivedAt    DateTime @default(now())
+  finishedAt    DateTime?
+
+  @@unique([integrationId, eventKey])
+  @@index([state, nextAttemptAt])
+  @@map("careWebhookReceipt")
+}
+
+model CareAiJob {
+  id            String @id @default(cuid())
+  integrationId String
+  integration   CareIntegration @relation(fields: [integrationId], references: [id], onDelete: Restrict)
+  configVersion Int
+  requestId     String
+  createdBy     String
+  input         Json
+  result        Json?
+  state         CareJobState @default(PENDING)
+  leaseToken    String?
+  leaseUntil    DateTime?
+  lastError     String?
+  model         String
+  inputTokens   Int?
+  outputTokens  Int?
+  createdAt     DateTime @default(now())
+  finishedAt    DateTime?
+
+  @@unique([createdBy, requestId])
+  @@index([state, createdAt])
+  @@map("careAiJob")
+}
+
 enum CareBrand {
   UMEHA
   LI_EN_SPORT

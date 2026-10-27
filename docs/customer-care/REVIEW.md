@@ -2,6 +2,10 @@
 
 Ngày: 27/10/2026. Baseline: `711c909cf016e738c5b2e9418310485ad67bee47`.
 
+## Nguồn và care AI bổ sung
+
+Review độc lập chỉ đọc xác nhận không còn finding trong phần E/F cuối. Đã sửa AI check không claim được trạng thái NULL; check/model bị gián đoạn không tự gọi lại. Mỗi webhook receipt dùng clock mới và retry deadline mới. HTTP parser trả 400/413 bằng thông báo cố định, không log raw body. POS parser chấp nhận thiếu page_number nhưng giữ kiểm tra mismatch, total-pages drift và đơn lặp. AI chỉ có tool đọc; apply cần quản lý và tạo template chưa duyệt. Review không gọi nguồn/model thật hoặc xác nhận production/pilot. Evidence: VALIDATION.md.
+
 ## Kết quả kỹ thuật
 
 Review độc lập chỉ đọc source, không sửa file hoặc gọi nguồn khách hàng. Các lỗi được sửa và kiểm lại:

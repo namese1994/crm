@@ -17,6 +17,14 @@ module.exports = {
 	apps: [
 		{
 			...common,
+			name: "crm-care-agent",
+			cwd: path.join(root, "apps/agent"),
+			script: runtime,
+			args: ["dist-care/care-worker.js"],
+			interpreter: "none",
+		},
+		{
+			...common,
 			name: "crm-web",
 			cwd: path.join(root, "apps/app"),
 			script: require.resolve("next/dist/bin/next", {

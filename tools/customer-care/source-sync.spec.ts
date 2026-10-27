@@ -346,6 +346,7 @@ for (const scenario of [
 	"changed-pages",
 	"empty-last-page",
 	"complete",
+	"no-page-number",
 ] as const) {
 	test(`POS pagination ${scenario} preserves complete-scan semantics`, async () =>
 		sourceScenario(async ({ pageId, key, now, watermark }) => {
@@ -361,7 +362,7 @@ for (const scenario of [
 				const page = Number(url.searchParams.get("page_number"));
 				return Response.json({
 					success: true,
-					page_number: page,
+					page_number: scenario === "no-page-number" ? undefined : page,
 					total_pages: scenario === "changed-pages" && page === 2 ? 1 : 2,
 					data:
 						scenario === "empty-last-page" && page === 2
@@ -386,7 +387,9 @@ for (const scenario of [
 				where: { id: key },
 			});
 			expect(state.watermark?.toISOString()).toBe(
-				scenario === "complete" ? now.toISOString() : watermark.toISOString(),
+				["complete", "no-page-number"].includes(scenario)
+					? now.toISOString()
+					: watermark.toISOString(),
 			);
 			expect(state.lastError).toBe(
 				scenario === "repeat-order"
@@ -397,7 +400,9 @@ for (const scenario of [
 							? "POS_PAGE_INCOMPLETE"
 							: null,
 			);
-			expect(imported).toHaveLength(scenario === "complete" ? 2 : 1);
+			expect(imported).toHaveLength(
+				["complete", "no-page-number"].includes(scenario) ? 2 : 1,
+			);
 			expect(state.leaseToken).toBeNull();
 		}));
 }

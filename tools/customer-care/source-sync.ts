@@ -1,3 +1,4 @@
+import { readCareSource } from "@crm/auth/care-config";
 import { db } from "@crm/db";
 import type {
 	CareImport,
@@ -45,14 +46,15 @@ const posPage = z.object({
 	success: z.literal(true),
 	data: z.array(posOrder),
 	total_pages: z.number().int().nonnegative(),
-	page_number: z.number().int().positive(),
+	page_number: z.number().int().positive().optional(),
 });
 class OrderPagination {
 	private totalPages: number | undefined;
 	private seen = new Set<string>();
 
 	accept(data: z.infer<typeof posPage>, page: number) {
-		if (data.page_number !== page) throw new Error("POS_PAGE_MISMATCH");
+		if (data.page_number !== undefined && data.page_number !== page)
+			throw new Error("POS_PAGE_MISMATCH");
 		if (this.totalPages !== undefined && this.totalPages !== data.total_pages)
 			throw new Error("POS_PAGINATION_CHANGED");
 		if (
@@ -172,18 +174,21 @@ export const SOURCE_SYNC = {
 } as const;
 
 type Channel = z.infer<typeof channelSchema>;
-type ImportOrder = (
+export type ImportOrder = (
 	value: CareImport,
 	actor: string,
 	now: Date,
 	sourceLease: CareSourceLease,
 ) => Promise<unknown>;
 
-function orderListUrl(channel: Channel, page: number) {
+function orderListUrl(
+	channel: Channel,
+	page: number,
+	apiKey = process.env.CARE_POS_API_KEY,
+) {
 	const url = new URL(
 		`https://pos.pages.fm/api/v1/shops/${channel.shopId}/orders`,
 	);
-	const apiKey = process.env.CARE_POS_API_KEY;
 	if (!apiKey) throw new Error("POS_API_KEY_MISSING");
 	url.searchParams.set("api_key", apiKey);
 	url.searchParams.set("page_number", String(page));
@@ -207,11 +212,12 @@ function orderListUrl(channel: Channel, page: number) {
 async function refreshEnrolled(
 	channel: Channel,
 	conversations: Map<string, z.infer<typeof conversation>>,
-	token: string,
+	token: string | undefined,
 	importOrder: ImportOrder,
 	now: Date,
 	renewLease: () => Promise<void>,
 	sourceLease: CareSourceLease,
+	apiKey: string,
 ) {
 	const customers = await db.careCustomer.findMany({
 		where: {
@@ -230,7 +236,7 @@ async function refreshEnrolled(
 		const pagination = new OrderPagination();
 		for (let page = 1; page <= SOURCE_SYNC.maxPages; page++) {
 			await renewLease();
-			const url = orderListUrl(channel, page);
+			const url = orderListUrl(channel, page, apiKey);
 			url.searchParams.set("customer_id", customer.sourceCustomerId);
 			const data = posPage.parse(await getJson(url));
 			const complete = pagination.accept(data, page);
@@ -245,7 +251,7 @@ async function refreshEnrolled(
 				const linked = raw.customer.fb_id
 					? conversations.get(raw.customer.fb_id)
 					: undefined;
-				if (linked)
+				if (linked && token)
 					order.conversation = await loadActivity(
 						channel.pageId,
 						linked,
@@ -358,7 +364,7 @@ export function normalizeOrder(
 	};
 }
 
-async function getJson(url: URL): Promise<unknown> {
+export async function getJson(url: URL): Promise<unknown> {
 	await Bun.sleep(SOURCE_SYNC.requestGapMs);
 	let response: Response;
 	try {
@@ -376,20 +382,36 @@ async function getJson(url: URL): Promise<unknown> {
 }
 
 export async function syncSources(importOrder: ImportOrder, now = new Date()) {
+	const stored = await readCareSource();
 	if (
-		!process.env.CARE_CHANNELS_JSON ||
-		!process.env.CARE_POS_API_KEY ||
-		!process.env.CARE_PANCAKE_TOKENS_JSON
+		stored &&
+		(!stored.row.enabled || stored.row.checkedVersion !== stored.row.version)
 	)
 		return { configured: false, imported: 0 };
-	const channels = z
-		.array(channelSchema)
-		.min(1)
-		.max(10)
-		.parse(JSON.parse(process.env.CARE_CHANNELS_JSON));
-	const tokens = z
-		.record(z.string(), z.string().min(1))
-		.parse(JSON.parse(process.env.CARE_PANCAKE_TOKENS_JSON));
+	if (
+		!stored &&
+		(!process.env.CARE_CHANNELS_JSON ||
+			!process.env.CARE_POS_API_KEY ||
+			!process.env.CARE_PANCAKE_TOKENS_JSON)
+	)
+		return { configured: false, imported: 0 };
+	const channels = stored
+		? stored.config.channels.map((channel) => ({
+				...channel,
+				shopId: stored.config.shopId,
+			}))
+		: z
+				.array(channelSchema)
+				.min(1)
+				.max(10)
+				.parse(JSON.parse(process.env.CARE_CHANNELS_JSON ?? "[]"));
+	const tokens =
+		stored?.secrets.pancakeTokens ??
+		z
+			.record(z.string(), z.string().min(1))
+			.parse(JSON.parse(process.env.CARE_PANCAKE_TOKENS_JSON ?? "{}"));
+	const apiKey = stored?.secrets.apiKey ?? process.env.CARE_POS_API_KEY;
+	if (!apiKey) return { configured: false, imported: 0 };
 	let imported = 0;
 	for (const channel of channels) {
 		const key = `${channel.brand}:${channel.shopId}:${channel.pageId}`;
@@ -423,6 +445,14 @@ export async function syncSources(importOrder: ImportOrder, now = new Date()) {
 		});
 		if (!lease.count) continue;
 		const renewLease = async () => {
+			if (stored) {
+				const current = await db.careIntegration.findUnique({
+					where: { id: stored.row.id },
+					select: { enabled: true, version: true },
+				});
+				if (!current?.enabled || current.version !== stored.row.version)
+					throw new Error("SOURCE_CONFIG_CHANGED");
+			}
 			const renewed = await db.careSyncState.updateMany({
 				where: { id: key, leaseToken },
 				data: { leaseUntil: new Date(Date.now() + SOURCE_SYNC.leaseMs) },
@@ -431,18 +461,15 @@ export async function syncSources(importOrder: ImportOrder, now = new Date()) {
 		};
 		try {
 			const token = tokens[channel.pageId];
-			if (!token) throw new Error("PANCAKE_PAGE_TOKEN_MISSING");
 			const cursor = await db.careSyncState.findUniqueOrThrow({
 				where: { id: key },
 			});
 			const since = cursor.watermark
 				? new Date(cursor.watermark.getTime() - SOURCE_SYNC.overlapMs)
 				: new Date(now.getTime() - SOURCE_SYNC.initialDays * 86_400_000);
-			const conversations = await loadConversations(
-				channel.pageId,
-				token,
-				renewLease,
-			);
+			const conversations = token
+				? await loadConversations(channel.pageId, token, renewLease)
+				: new Map<string, z.infer<typeof conversation>>();
 			const activities = new Map<
 				string,
 				NonNullable<CareImport["conversation"]>
@@ -451,7 +478,7 @@ export async function syncSources(importOrder: ImportOrder, now = new Date()) {
 			const pagination = new OrderPagination();
 			for (let page = 1; page <= SOURCE_SYNC.maxPages; page++) {
 				await renewLease();
-				const url = orderListUrl(channel, page);
+				const url = orderListUrl(channel, page, apiKey);
 				url.searchParams.set("update_status", "updated_at");
 				url.searchParams.set(
 					"start_date_time",
@@ -470,7 +497,7 @@ export async function syncSources(importOrder: ImportOrder, now = new Date()) {
 					const linked = raw.customer.fb_id
 						? conversations.get(raw.customer.fb_id)
 						: undefined;
-					if (linked) {
+					if (linked && token) {
 						let activity = activities.get(linked.id);
 						if (!activity) {
 							activity = await loadActivity(channel.pageId, linked, token, now);
@@ -497,10 +524,15 @@ export async function syncSources(importOrder: ImportOrder, now = new Date()) {
 				now,
 				renewLease,
 				sourceLease,
+				apiKey,
 			);
 			await db.careSyncState.updateMany({
 				where: { id: key, leaseToken },
-				data: { watermark: now, lastSuccessAt: new Date(), lastError: null },
+				data: {
+					watermark: now,
+					lastSuccessAt: new Date(),
+					lastError: token ? null : "PANCAKE_NOT_CONFIGURED",
+				},
 			});
 		} catch (error) {
 			const code =

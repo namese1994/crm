@@ -6,6 +6,7 @@
 	"exports": {
 		"./api-keys": "./src/api-keys.ts",
 		"./auth": "./src/auth.ts",
+		"./care-config": "./src/care-config.ts",
 		"./chat-event-crypto": "./src/chat-event-crypto.ts",
 		"./client": "./src/client.ts",
 		"./cookies": "./src/cookies.ts",

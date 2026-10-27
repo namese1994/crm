@@ -8,13 +8,26 @@ Cập nhật: 27/10/2026, Asia/Ho_Chi_Minh. Đọc cùng BACKLOG.md, SOURCE-CONT
 - Baseline upstream main: `711c909cf016e738c5b2e9418310485ad67bee47`.
 - Commit nền triển khai: `f81fab7`; bản vá dependency: `04182b1`; bản sửa review: `78f59bc`; đồng bộ tài liệu: `5e0fb40`.
 - Nhánh đã push lên fork. PR nháp: https://github.com/namese1994/crm/pull/1, base `main`. Chưa merge hoặc triển khai production.
-- Windows: `\\100.104.251.126\Documents\AI_Workspace\apps\crm` (alias cũ Y:\AI_Workspace\apps\crm).
+- Windows ưu tiên theo Nam: `Y:\AI_Workspace\apps\crm`. Cùng checkout với `\\100.104.251.126\Documents\AI_Workspace\apps\crm`; không tạo bản sao hoặc Git lồng trong gstack.
 - Linux cùng file: `/workspace/apps/crm`, qua nam-mcp workspace runner, container phát triển.
 - Không sửa gstack/n8n hoặc logic/bảng size. Không gửi tin khách. Không xóa thay đổi ngoài phạm vi.
 
 ## Đã triển khai và kiểm tra
 
-### Bản test truy cập được, 27/10/2026
+### Bản hiện tại: nguồn trên app và trợ lý AI, 27/10/2026
+
+- Đã triển khai `/crm-thu-nghiem-umeha/settings/connections/poscake`, `/settings/care-ai` và `/care` → Trợ lý AI. Đường dẫn thứ hai/thứ ba cũng có workspace slug.
+- Runtime dùng `crm_care_staging`, tạo mới và áp dụng migration. Giữ tài khoản owner và session còn hạn; không sao chép khách, template, chính sách hoặc cấu hình demo. Demo cũ vẫn ở `crm_care_demo_test`.
+- Khóa mã hóa nằm trong root `.env` bị ignore. Sau QA cleanup: 1 user, 0 khách, 0 template, 0 integration, 0 AI job. Chưa nhập khóa nguồn/model thật.
+- Bốn process CRM online: web, API, care-worker, care-agent. Tunnel giữ nguyên hostname; demo refresh stopped; PM2 saved. Reboot và hostname production chưa chứng nhận.
+- API 470 ca/1.205 assertions; web 236 ca/534 assertions; source + care-agent 18 ca/74 assertions đạt. Typecheck 11 task, lint 10 task, anti-slop 0 lỗi; audit 0 trên 1.075 package. Bốn build đạt. Suite research agent có lỗi baseline ở phần lịch sử chưa chạy lại.
+- Browser lưu cấu hình bằng khóa giả, xác minh trường khóa trống sau lưu, lấy URL/header webhook và chỉ đo độ dài khóa. Không request check nguồn/model bằng khóa giả; cleanup có guard theo owner/version/tên/model.
+- POSCake/AI/assistant không tràn ở 360/412/1280px; pageerror và console error 0. Đây là Chromium mô phỏng, chưa phải Android thật.
+- HTTP webhook: 202 hợp lệ, replay không nhân đôi, JSON hỏng 400, quá dung lượng 413. Native POS GET-only xác nhận list không luôn có page_number, get trả data:order. App sync/webhook/model thật chưa chứng nhận.
+- Review độc lập cuối PASS sau sửa AI check NULL, chặn paid retry sau gián đoạn và clock mới cho từng receipt. Không gửi tin, tự enroll, tự duyệt chính sách/template hoặc sửa size.
+- Heartbeat PAUSED. Tiếp tục thủ công không bật lại lịch. E/F: technical-pass-live-certification-pending.
+
+### Lịch sử bản demo trước khi tách staging, 27/10/2026
 
 - URL HTTPS tạm: https://essentially-athens-acdbentity-fed.trycloudflare.com . Mở root để đăng nhập; slug hiện tại được chuẩn hóa thành `crm-thu-nghiem-umeha` khi tạo session.
 - Tài khoản owner của Nam được cấp bằng CLI, mật khẩu scrypt hash, không xác nhận email giả. Thông tin đăng nhập nằm riêng trong `.scratch/TEST-ACCESS.md` bị ignore; không đưa vào log, Git hoặc PR.
@@ -79,6 +92,12 @@ Cập nhật: 27/10/2026, Asia/Ho_Chi_Minh. Đọc cùng BACKLOG.md, SOURCE-CONT
 - Mốc preview trước khi thêm đăng nhập mật khẩu: `.scratch/pilot-verification.json` có checks, audit và ba build exit 0; `.scratch/pilot-tests.log` có 43 ca/153 assertions. Kết quả sau triển khai test nằm ở đầu checkpoint. Không cần chạy lại suite khi chỉ thay tài liệu.
 - D02 vẫn cần nguồn runtime, chính sách, đăng nhập nhân viên và danh sách thật. D03 chưa bắt đầu; không có tin khách thật nào được gửi.
 
+## E/F additions awaiting validation
+
+E01–E03 and F01–F03 are `technical-pass-live-certification-pending`. The staging app includes source settings, the durable POSCake webhook inbox and the care AI worker. See the current evidence above and [SETTINGS-AND-WEBHOOK.md](SETTINGS-AND-WEBHOOK.md).
+
+Current E/F technical evidence is recorded in VALIDATION.md. Real source/model probes, production acceptance and observed pilot remain pending.
+
 ## Heartbeat
 
-ID `ho-n-t-t-crm-ch-m-s-c-kh-ch-a-d`, mỗi 30 phút, ACTIVE. Không tạo trùng hoặc tắt khi mới xong code. Nếu chỉ còn phụ thuộc ngoài và không có bằng chứng mới, giữ yên lặng; không lặp lại full suite hoặc thông báo cùng một thiếu hụt mỗi lượt. Chỉ tắt khi mọi A–D có bằng chứng, gồm pilot thực tế.
+ID `ho-n-t-t-crm-ch-m-s-c-kh-ch-a-d` is PAUSED at Nam's request. Continue authorized work manually. A general “TIẾP” instruction does not resume this schedule. Resume the heartbeat only after Nam explicitly requests resuming it. D02/D03 acceptance remains open.

@@ -4,6 +4,32 @@ Kiểm tra ngày 27/10/2026, giờ Việt Nam. Đây là bằng chứng kỹ thu
 
 ## Kết quả
 
+### Bổ sung nguồn và AI đang chạy trên staging, 27/10/2026
+
+| Kiểm tra | Bằng chứng hiện tại |
+|---|---|
+| API | 470 ca đạt, 1.205 assertions; gồm 10 ca cấu hình/webhook |
+| Web | 236 ca đạt, 534 assertions |
+| Source và care AI | 18 ca đạt, 74 assertions; model giả lập |
+| Kiểu / lint / anti-slop | 11 task / 10 task đạt; anti-slop 0 cảnh báo và lỗi |
+| Dependency | Audit 0 lỗ hổng trên 1.075 package |
+| Build | API, care-worker, care-agent và Next production đạt; API build lại sau sửa 400/413 |
+| HTTP | Webhook JSON hợp lệ 202; replay chống trùng; JSON hỏng 400; quá 256 KiB trả 413 |
+| Browser | Lưu source/LLM bằng khóa giả; khóa trống sau lưu; không bật trước kiểm tra. URL/header webhook đúng; không log giá trị khóa |
+| Responsive | Ba màn hình POSCake/AI/assistant không tràn ở 360/412/1280px; 0 pageerror/console error |
+| Runtime | Staging mới, migration đầy đủ, giữ owner; 4 process CRM và tunnel online; demo refresh stopped; PM2 saved |
+| Review | Độc lập read-only PASS sau sửa NULL claim, lease clock, interrupted paid check và 400/413 |
+
+Log cục bộ bị ignore: `.scratch/integrations-final-results.json`, `integrations-final-*`, `integrations-build-results.json`, `integrations-http-final2.log`, `integrations-browser-*`. Cả 7 child check exit 0. Runner tổng chạm timeout sau khi ghi đủ kết quả; đã đọc lại từng kết quả/log, không suy ra pass từ timeout.
+
+QA chỉ lưu hai cấu hình khóa giả ở trạng thái tắt, không request check, không gọi nguồn/model. Cleanup có guard owner/version/tên/model. Sau cleanup: 1 user, 0 khách/template/integration/job. Không nhập hoặc gửi tin khách thật.
+
+Migration đã áp dụng có một dòng trắng cuối file. Giữ checksum đã triển khai; diff check bỏ riêng blank-at-eof và không phát hiện lỗi whitespace khác. Quét staged diff không có HIGH/MEDIUM/LOW/WARN; `.env`, khóa, mật khẩu, ảnh/log và build output đều bị ignore.
+
+Native POS GET-only xác nhận list không luôn có page_number; parser vẫn kiểm mismatch khi có, tổng trang đổi và đơn lặp. Get trả `{success,data:order}`. App sync có credentials thật, webhook thật, model thật, Android thật, production và D02/D03 vẫn chưa chứng nhận.
+
+### Các mốc trước bổ sung E/F
+
 | Hạng mục | Kết quả | Giới hạn |
 |---|---|---|
 | Migration | Hai migration chăm sóc đã áp dụng trên Postgres test | Chưa áp dụng vào database vận hành |

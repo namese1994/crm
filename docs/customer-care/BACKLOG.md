@@ -56,12 +56,29 @@ Android responsive web is the current assumption from answer #9. APK, offline an
 
 Tình huống kinh doanh và hành vi tương ứng: `SCENARIOS.md`. Chi tiết bằng chứng và giới hạn: `VALIDATION.md`.
 
-A–D is complete only when every acceptance item has evidence, including observed pilot. Do not close the heartbeat because code compiles. Do not mark live source sync, deployment, content approval or real usage as completed from fixtures.
+A–D is complete only when every acceptance item has evidence, including observed pilot. Scheduling remains PAUSED at Nam's request. Do not mark live source sync, deployment, content approval or real usage as completed from fixtures.
 
 ## Operating rules
 
 One proactive touch/customer/brand/7 days initially. Immediate support remains separate. Two unanswered proactive touches pause nurturing. A customer reply pauses the sequence. A new purchase recalculates from verified delivery. A copied but unconfirmed message stays pending. Uncertain results require reconciliation. The copy path never overrides a platform refusal or customer opt-out.
 
+## Bổ sung được yêu cầu ngày 27/10/2026
+
+Status: `technical-pass-live-certification-pending` for E01–E03 and F01–F03. The staging deployment includes these additions. Technical evidence: VALIDATION.md. Real source/model certification remains pending.
+
+Guide: [SETTINGS-AND-WEBHOOK.md](SETTINGS-AND-WEBHOOK.md). No real source credentials, model certification, production acceptance or observed pilot is established.
+
+Heartbeat đã PAUSED theo yêu cầu Nam. Tiếp tục triển khai thủ công; yêu cầu “TIẾP” không tự bật lại lịch.
+
+| ID | Việc | Tiêu chí nghiệm thu |
+|---|---|---|
+| E01 | Nguồn POSCake trên app | Quản lý nhập shop, API key, map thương hiệu/page và token Pancake; khóa lưu mã hóa; nhân viên không sửa hoặc đọc khóa; kiểm tra kết nối có trạng thái thật |
+| E02 | Webhook POSCake | URL và header xác thực cấu hình được; inbox bền vững, nhận trùng không nhân đôi; fetch đơn chuẩn từ POS, không tin ngày giao trong webhook; retry có giới hạn và log trạng thái |
+| E03 | Đồng bộ nguồn cấu hình DB | Worker đọc cấu hình trên app, giữ fallback môi trường cũ; POS độc lập với token hội thoại; thiếu hội thoại vẫn chặn chủ động chăm sóc; đổi/tắt nguồn vô hiệu hóa lease cũ |
+| F01 | Cấu hình LLM trên app | Endpoint HTTPS, model, khóa mã hóa, chính sách theo brand và giới hạn sử dụng; kiểm tra kết nối, bật/tắt có quyền quản lý; không trả khóa qua query |
+| F02 | Trợ lý AI chăm sóc | Worker trong apps/agent, quyền đọc và đề xuất; soạn mẫu theo nhóm/tag, kiểm tra ngữ cảnh khách, trả lời câu hỏi; chỉ áp dụng thành bản nháp sau thao tác người dùng; không duyệt, enroll hoặc gửi tin |
+| F03 | Kiểm thử và triển khai | Test quyền/khóa/webhook trùng/lease/giới hạn lượt/LLM lỗi; kiểm tra Android viewport; cập nhật bản test để Nam cấu hình trực tiếp; ghi rõ phần chưa chứng nhận bằng nguồn và model thật |
+
 ## Resume
 
-Read `CHECKPOINT.md`, this backlog, `SOURCE-CONTRACTS.md`, then the changed source/test files. Keep heartbeat `ho-n-t-t-crm-ch-m-s-c-kh-ch-a-d` active every 30 minutes until actual completion. Report only meaningful changes or actionable blockers.
+Read `CHECKPOINT.md`, this backlog, `SOURCE-CONTRACTS.md` and `SETTINGS-AND-WEBHOOK.md`, then the changed source/test files. Heartbeat `ho-n-t-t-crm-ch-m-s-c-kh-ch-a-d` is PAUSED. Resume scheduling only after Nam explicitly requests resuming the heartbeat. Report only meaningful changes or actionable blockers.

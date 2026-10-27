@@ -1046,29 +1046,40 @@ export class CustomerCareService {
 	}
 
 	async summary(userId: string) {
-		const [open, waiting, sentManual, customers, role, sources] =
-			await Promise.all([
-				this.db.careTask.count({
-					where: {
-						customer: { ownerId: userId },
-						state: { in: ["OPEN", "CLAIMED", "COPIED"] },
-					},
-				}),
-				this.db.careTask.count({
-					where: { customer: { ownerId: userId }, state: "WAITING" },
-				}),
-				this.db.careTask.count({
-					where: {
-						outcome: { in: ["SENT_MANUAL", "RECONCILED_SENT"] },
-						customer: { ownerId: userId },
-					},
-				}),
-				this.db.careCustomer.count(),
-				workspaceRoleOf(userId, this.db),
-				this.db.careSyncState.findMany({
-					select: { id: true, lastSuccessAt: true, lastError: true },
-				}),
-			]);
+		const [
+			open,
+			waiting,
+			sentManual,
+			customers,
+			role,
+			sources,
+			configuredSource,
+		] = await Promise.all([
+			this.db.careTask.count({
+				where: {
+					customer: { ownerId: userId },
+					state: { in: ["OPEN", "CLAIMED", "COPIED"] },
+				},
+			}),
+			this.db.careTask.count({
+				where: { customer: { ownerId: userId }, state: "WAITING" },
+			}),
+			this.db.careTask.count({
+				where: {
+					outcome: { in: ["SENT_MANUAL", "RECONCILED_SENT"] },
+					customer: { ownerId: userId },
+				},
+			}),
+			this.db.careCustomer.count(),
+			workspaceRoleOf(userId, this.db),
+			this.db.careSyncState.findMany({
+				select: { id: true, lastSuccessAt: true, lastError: true },
+			}),
+			this.db.careIntegration.findFirst({
+				where: { kind: "POSCAKE", enabled: true },
+				select: { id: true },
+			}),
+		]);
 		return {
 			open,
 			pilotPreviewLimit: CARE.pilotPreviewLimit,
@@ -1076,7 +1087,7 @@ export class CustomerCareService {
 			sentManual,
 			customers,
 			sources,
-			syncConfigured: this.sourcesConfigured(),
+			syncConfigured: this.sourcesConfigured() || Boolean(configuredSource),
 			demo: new URL(
 				process.env.DATABASE_URL ?? "postgresql://localhost/unknown",
 			).pathname.endsWith("_test"),

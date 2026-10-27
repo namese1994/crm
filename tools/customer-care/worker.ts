@@ -4,6 +4,7 @@ import { db } from "@crm/db";
 import { CARE } from "@crm/validation/customer-care";
 import { Logger } from "@nestjs/common";
 import { CustomerCareService } from "../../apps/api/src/customer-care/customer-care.service";
+import { checkPosSource, processPosWebhooks } from "./integration-worker";
 import { syncSources } from "./source-sync";
 
 const logger = new Logger("CareWorker");
@@ -21,6 +22,10 @@ process.on("SIGINT", stop);
 
 while (!stopping) {
 	try {
+		await checkPosSource();
+		await processPosWebhooks((input, actor, now, sourceLease) =>
+			care.importOrder(input, actor, now, sourceLease),
+		);
 		await syncSources((input, actor, now, sourceLease) =>
 			care.importOrder(input, actor, now, sourceLease),
 		);

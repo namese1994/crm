@@ -20,6 +20,7 @@ import { companyListInput, companyListOutput, companyIdInput, companyDetailOutpu
 import { contactListInput, contactListOutput, contactIdInput, contactByIdOutput, contactCreateInput, contactBasicOutput, contactUpdateArgs, contactNameOutput, contactEnrichOutput, contactBulkOwnerInput, bulkResultOutput, contactBulkCompanyInput, contactBulkInput, factDecisionInput, decideFactOutput } from "../contacts/contacts.contracts";
 import { conversationListInput, conversationListOutput, builderListOutput, builderResourceSearchInput, builderResourcesOutput, conversationIdInput, builderConversationDetailOutput, conversationEventsInput, conversationEventsOutput, conversationSaveInput, conversationIdOutput, builderConversationCreateInput, builderConversationSubmitInput, builderQuestionResponseInput, builderApprovalResponseInput, builderSessionLimitResponseInput, builderPermissionModeInput, builderResponseRatingInput, builderResponseRatingOutput, conversationShareStatusOutput, conversationShareTokenOutput, sharedConversationInput, sharedConversationOutput } from "../conversations/conversations.contracts";
 import { currencySettingsOutput, setReportingCurrencyInput, setManualRateInput, removeManualRateInput } from "../currency/currency.contracts";
+import { careIntegrationStatus, careSourceSave, careIntegrationPublic, careAiSave, careIntegrationAction, careIntegrationToggle, CARE_INTEGRATIONS, careJobState, careAiRequest, careAiJobPublic } from "@crm/validation/care-integrations";
 import { careListInput, careMetrics, careBrand, careCustomerInput, carePilotPreviewInput, carePilotPreviewOutput, careTaskInput, careCustomerResolution, careActionInput, careTemplateInput, careTemplateApproval, careImport } from "@crm/validation/customer-care";
 import { dashboardSummaryInput, dashboardSummaryOutput } from "../dashboard/dashboard.contracts";
 import { dealListInput, dealListOutput, dealIdInput, dealDetailOutput, dealCreateInput, dealCreateOutput, dealUpdateArgs, dealMutateOutput, setStageInput, dealSetStageOutput, dealContactsInput, dealContactOptionsOutput, dealAttachContactInput, dealContactLinkOutput, dealDetachContactInput, dealContactRoleInput, dealContactRoleOutput, dealBulkOwnerInput, dealBulkResultOutput, dealBulkStageInput, dealBulkInput } from "../deals/deals.contracts";
@@ -378,6 +379,44 @@ const appRouter = t.router({
       .mutation(async () => "PLACEHOLDER_DO_NOT_REMOVE" as any),
     refreshRates: publicProcedure
       .output(currencySettingsOutput)
+      .mutation(async () => "PLACEHOLDER_DO_NOT_REMOVE" as any)
+    }),
+  careIntegrations: t.router({
+    status: publicProcedure
+      .output(careIntegrationStatus)
+      .query(async () => "PLACEHOLDER_DO_NOT_REMOVE" as any),
+    saveSource: publicProcedure
+      .input(careSourceSave)
+      .output(careIntegrationPublic.nullable())
+      .mutation(async () => "PLACEHOLDER_DO_NOT_REMOVE" as any),
+    saveAi: publicProcedure
+      .input(careAiSave)
+      .output(careIntegrationPublic.nullable())
+      .mutation(async () => "PLACEHOLDER_DO_NOT_REMOVE" as any),
+    check: publicProcedure
+      .input(careIntegrationAction)
+      .output(careIntegrationPublic.nullable())
+      .mutation(async () => "PLACEHOLDER_DO_NOT_REMOVE" as any),
+    toggle: publicProcedure
+      .input(careIntegrationToggle)
+      .output(careIntegrationPublic.nullable())
+      .mutation(async () => "PLACEHOLDER_DO_NOT_REMOVE" as any),
+    webhookInfo: publicProcedure
+      .output(z.object({ url: z.url(), header: z.literal(CARE_INTEGRATIONS.webhookHeader), key: z.string() }))
+      .mutation(async () => "PLACEHOLDER_DO_NOT_REMOVE" as any),
+    receipts: publicProcedure
+      .output(z.array(z.object({ id: z.string(), orderId: z.string(), state: careJobState, attempts: z.number(), lastError: z.string().nullable(), receivedAt: z.date(), finishedAt: z.date().nullable() })))
+      .query(async () => "PLACEHOLDER_DO_NOT_REMOVE" as any),
+    requestAi: publicProcedure
+      .input(careAiRequest)
+      .output(z.object({ id: z.string() }))
+      .mutation(async () => "PLACEHOLDER_DO_NOT_REMOVE" as any),
+    aiJobs: publicProcedure
+      .output(z.array(careAiJobPublic))
+      .query(async () => "PLACEHOLDER_DO_NOT_REMOVE" as any),
+    applyAiDraft: publicProcedure
+      .input(z.object({ id: z.string() }))
+      .output(z.object({ id: z.string() }))
       .mutation(async () => "PLACEHOLDER_DO_NOT_REMOVE" as any)
     }),
   care: t.router({

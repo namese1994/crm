@@ -11,6 +11,7 @@ bun install --frozen-lockfile
 bun run --filter=@crm/db db:generate
 bun run --filter=api build
 bun run --filter=@crm/care-worker build
+bun run --filter=agent build:care
 bun run --filter=app build
 ```
 
@@ -50,6 +51,8 @@ Restart web/API after changing auth configuration. Password reset by email is no
 
 ## Source verification
 
+The E/F additions pass technical validation and run in staging. Read [source settings, webhooks and the care assistant](SETTINGS-AND-WEBHOOK.md). Real source/model certification remains pending. The fourth CRM process, `crm-care-agent`, processes explicitly requested care AI work.
+
 Read `SOURCE-CONTRACTS.md`. The direct source adapter is not yet live-certified. Source credentials are optional. Missing credentials disable source pulls. No API key, token or URL query is logged.
 
 Do not set `activityVerifiedAt` from `conversation.updated_at`. Tag edits can change that field. The adapter reads actual messages using the official v1 endpoint and validates page/conversation/customer IDs before recording activity verification. The official conversation list uses v2 with `last_conversation_id`, not numbered pages. The native wrapper's documented v2 message route returned HTML; this was traced to the version mismatch using the official OpenAPI specification. Both brand pages were confirmed through live GET-only POS shop metadata. Direct authenticated runtime sync still needs certification.
@@ -81,4 +84,4 @@ Keep demo and automated tests in separate databases. The synthetic helper uses D
 8. Observe employee use on real Android devices for approximately two weeks.
 9. Reconcile manual confirmations against platform history where available.
 
-Code tests and a synthetic browser walkthrough do not complete the real pilot. Keep the heartbeat active until D03 has observed evidence.
+Code tests and a synthetic browser walkthrough do not complete the real pilot. The heartbeat is PAUSED at Nam's request. A general “TIẾP” instruction continues manual work; it does not resume the schedule. Resume scheduling only after Nam explicitly requests it.

@@ -30,6 +30,11 @@ export class EnvironmentVariables {
 
 	@IsOptional()
 	@IsString()
+	@Matches(/^[A-Za-z0-9+/]{43}=$/)
+	CARE_CONFIG_ENCRYPTION_KEY?: string;
+
+	@IsOptional()
+	@IsString()
 	CARE_CHANNELS_JSON?: string;
 
 	@IsOptional()

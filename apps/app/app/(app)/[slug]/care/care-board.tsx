@@ -35,6 +35,7 @@ import { useCrmCache } from "@/lib/trpc/cache";
 import { useTRPC } from "@/lib/trpc/client";
 import type { RouterOutputs } from "@/lib/trpc/types";
 import { useWorkspaceUrl } from "@/lib/use-workspace-url";
+import { CareAssistant } from "./care-assistant";
 import { CareCustomers } from "./care-customers";
 import { CareTemplates } from "./care-templates";
 
@@ -138,7 +139,14 @@ export function CareBoard({ userId }: { userId: string }) {
 					<TabsTrigger value="customers">Khách hàng</TabsTrigger>
 					<TabsTrigger value="templates">Nội dung</TabsTrigger>
 					<TabsTrigger value="metrics">Hiệu quả</TabsTrigger>
+					<TabsTrigger value="assistant">Trợ lý AI</TabsTrigger>
 				</TabsList>
+				<TabsContent value="assistant">
+					<CareAssistant
+						canManage={summary.data?.canManage ?? false}
+						userId={userId}
+					/>
+				</TabsContent>
 				<TabsContent value="queue">
 					<div className="flex flex-col gap-4">
 						<div className="flex flex-wrap items-center gap-3">

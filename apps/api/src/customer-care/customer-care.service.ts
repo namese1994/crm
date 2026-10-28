@@ -1,5 +1,6 @@
 import {
 	isWorkspaceAdmin,
+	toWorkspaceRole,
 	WORKSPACE_ID,
 	workspaceRoleOf,
 } from "@crm/auth/organization";
@@ -337,9 +338,12 @@ export class CustomerCareService {
 		expectedInboundAt: string | null,
 	) {
 		if (!reason.trim()) throw new BadRequestException("Cần ghi kết quả xử lý");
-		const manager = isWorkspaceAdmin(await workspaceRoleOf(actorId, this.db));
 		return this.db.$transaction(async (tx) => {
 			await this.lock(tx, id);
+			const role = await this.lockMembershipRole(tx, actorId);
+			if (!role)
+				throw new ForbiddenException("Nhân viên không còn trong workspace");
+			const manager = isWorkspaceAdmin(role);
 			const customer = await tx.careCustomer.findUniqueOrThrow({
 				where: { id },
 				include: customerContext,
@@ -387,10 +391,20 @@ export class CustomerCareService {
 		input: z.infer<typeof careCustomerInput>,
 		actorId: string,
 	) {
-		await this.requireManager(actorId);
 		return this.db.$transaction(async (tx) => {
 			await this.lock(tx, input.id);
-			if (input.ownerId && !(await this.lockMembership(tx, input.ownerId)))
+			const users = [
+				...new Set([actorId, ...(input.ownerId ? [input.ownerId] : [])]),
+			].sort();
+			const roles = new Map<
+				string,
+				Awaited<ReturnType<typeof this.lockMembershipRole>>
+			>();
+			for (const userId of users)
+				roles.set(userId, await this.lockMembershipRole(tx, userId));
+			if (!isWorkspaceAdmin(roles.get(actorId) ?? null))
+				throw new ForbiddenException("Chỉ quản lý được cấu hình chăm sóc");
+			if (input.ownerId && !roles.get(input.ownerId))
 				throw new BadRequestException("Nhân viên không thuộc workspace");
 			const previous = await tx.careCustomer.findUniqueOrThrow({
 				where: { id: input.id },
@@ -1281,6 +1295,13 @@ export class CustomerCareService {
 			{ id: string }[]
 		>`SELECT id FROM "member" WHERE "organizationId" = ${WORKSPACE_ID} AND "userId" = ${userId} FOR KEY SHARE`;
 		return rows.length > 0;
+	}
+
+	private async lockMembershipRole(tx: Tx, userId: string) {
+		const rows = await tx.$queryRaw<
+			{ role: string }[]
+		>`SELECT role FROM "member" WHERE "organizationId" = ${WORKSPACE_ID} AND "userId" = ${userId} FOR SHARE`;
+		return rows[0] ? toWorkspaceRole(rows[0].role) : null;
 	}
 
 	private async requireCurrentMember(tx: Tx, userId: string) {

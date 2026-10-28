@@ -578,6 +578,486 @@ test("care membership guard denies a valid session without workspace membership"
 	).rejects.toMatchObject({ code: "UNAUTHORIZED" });
 });
 
+test("customer resolution rejects an owner removed from the workspace", async () => {
+	const imported = await service.importOrder(
+		fixture("resolve-removed-owner"),
+		manager,
+		now,
+	);
+	await service.configureCustomer(
+		{ id: imported.customerId, enrolled: false, ownerId: actor, tags: [] },
+		manager,
+	);
+	const membership = await db.member.findUniqueOrThrow({
+		where: {
+			organizationId_userId: { organizationId: "workspace", userId: actor },
+		},
+	});
+	try {
+		await db.member.delete({ where: { id: membership.id } });
+		const before = await db.careEvent.count({
+			where: { customerId: imported.customerId },
+		});
+		await expect(
+			service.resolveCustomer(
+				imported.customerId,
+				actor,
+				"Synthetic resolution",
+				null,
+			),
+		).rejects.toThrow("Nhân viên không còn trong workspace");
+		expect(
+			await db.careEvent.count({ where: { customerId: imported.customerId } }),
+		).toBe(before);
+	} finally {
+		await db.member.upsert({
+			where: { id: membership.id },
+			create: membership,
+			update: {},
+		});
+	}
+});
+
+test("customer assignment rejects a manager demoted to member", async () => {
+	const imported = await service.importOrder(
+		fixture("assignment-demoted-manager"),
+		manager,
+		now,
+	);
+	const membership = await db.member.findUniqueOrThrow({
+		where: {
+			organizationId_userId: { organizationId: "workspace", userId: manager },
+		},
+	});
+	try {
+		await db.member.update({
+			where: { id: membership.id },
+			data: { role: "member" },
+		});
+		const before = await db.careEvent.count({
+			where: { customerId: imported.customerId },
+		});
+		await expect(
+			service.configureCustomer(
+				{ id: imported.customerId, enrolled: false, ownerId: actor, tags: [] },
+				manager,
+			),
+		).rejects.toThrow("Chỉ quản lý được cấu hình chăm sóc");
+		expect(
+			(
+				await db.careCustomer.findUniqueOrThrow({
+					where: { id: imported.customerId },
+				})
+			).ownerId,
+		).toBeNull();
+		expect(
+			await db.careEvent.count({ where: { customerId: imported.customerId } }),
+		).toBe(before);
+	} finally {
+		await db.member.update({
+			where: { id: membership.id },
+			data: { role: membership.role },
+		});
+	}
+});
+
+test("a manager can assign themselves, clear assignment, and cannot assign a missing member", async () => {
+	const imported = await service.importOrder(
+		fixture("assignment-owner-edges"),
+		manager,
+		now,
+	);
+	await service.configureCustomer(
+		{ id: imported.customerId, enrolled: false, ownerId: manager, tags: [] },
+		manager,
+	);
+	expect(
+		(
+			await db.careCustomer.findUniqueOrThrow({
+				where: { id: imported.customerId },
+			})
+		).ownerId,
+	).toBe(manager);
+	await service.configureCustomer(
+		{ id: imported.customerId, enrolled: false, ownerId: null, tags: [] },
+		manager,
+	);
+	const events = await db.careEvent.count({
+		where: { customerId: imported.customerId },
+	});
+	await expect(
+		service.configureCustomer(
+			{
+				id: imported.customerId,
+				enrolled: false,
+				ownerId: `${prefix}-missing`,
+				tags: [],
+			},
+			manager,
+		),
+	).rejects.toThrow("Nhân viên không thuộc workspace");
+	expect(
+		(
+			await db.careCustomer.findUniqueOrThrow({
+				where: { id: imported.customerId },
+			})
+		).ownerId,
+	).toBeNull();
+	expect(
+		await db.careEvent.count({ where: { customerId: imported.customerId } }),
+	).toBe(events);
+});
+
+test("assignment waiting for owner removal fails without changing customer", async () => {
+	const imported = await service.importOrder(
+		fixture("assignment-owner-removal"),
+		manager,
+		now,
+	);
+	const member = await db.member.findUniqueOrThrow({
+		where: {
+			organizationId_userId: { organizationId: "workspace", userId: actor },
+		},
+	});
+	const before = await db.careEvent.count({
+		where: { customerId: imported.customerId },
+	});
+	let releaseDeletion = () => {};
+	let signalDeletion = (_pid: number) => {};
+	let signalAssignment = (_pid: number) => {};
+	const release = new Promise<void>((resolve) => {
+		releaseDeletion = resolve;
+	});
+	const deletionPid = new Promise<number>((resolve) => {
+		signalDeletion = resolve;
+	});
+	const assignmentPid = new Promise<number>((resolve) => {
+		signalAssignment = resolve;
+	});
+	let deletion: Promise<unknown> | undefined;
+	let assignment: Promise<{ allowed: boolean; error?: unknown }> | undefined;
+	try {
+		deletion = db.$transaction(
+			async (tx) => {
+				const rows = await tx.$queryRaw<
+					{ pid: number }[]
+				>`SELECT pg_backend_pid() AS pid`;
+				if (!rows[0]) throw new Error("Missing deletion backend PID");
+				await tx.member.delete({ where: { id: member.id } });
+				signalDeletion(rows[0].pid);
+				await release;
+			},
+			{ timeout: 5000 },
+		);
+		const blockerPid = await Promise.race([
+			deletionPid,
+			deletion.then(() => {
+				throw new Error("Deletion ended before barrier");
+			}),
+		]);
+		const isolated = new CustomerCareService(db);
+		const original = (
+			Reflect.get(isolated, "lockMembershipRole") as (
+				tx: Prisma.TransactionClient,
+				id: string,
+			) => Promise<unknown>
+		).bind(isolated);
+		Reflect.set(
+			isolated,
+			"lockMembershipRole",
+			async (tx: Prisma.TransactionClient, id: string) => {
+				if (id === actor) {
+					const rows = await tx.$queryRaw<
+						{ pid: number }[]
+					>`SELECT pg_backend_pid() AS pid`;
+					if (!rows[0]) throw new Error("Missing assignment backend PID");
+					signalAssignment(rows[0].pid);
+				}
+				return original(tx, id);
+			},
+		);
+		assignment = isolated
+			.configureCustomer(
+				{ id: imported.customerId, enrolled: false, ownerId: actor, tags: [] },
+				manager,
+			)
+			.then(
+				() => ({ allowed: true }),
+				(error: unknown) => ({ allowed: false, error }),
+			);
+		const waiterPid = await Promise.race([
+			assignmentPid,
+			assignment.then(() => {
+				throw new Error("Assignment ended before barrier");
+			}),
+		]);
+		await waitForDatabaseLock(waiterPid, blockerPid);
+		releaseDeletion();
+		await deletion;
+		const result = await assignment;
+		expect(result.allowed).toBe(false);
+		expect(result.error).toMatchObject({
+			status: 400,
+			message: "Nhân viên không thuộc workspace",
+		});
+		expect(
+			(
+				await db.careCustomer.findUniqueOrThrow({
+					where: { id: imported.customerId },
+				})
+			).ownerId,
+		).toBeNull();
+		expect(
+			await db.careEvent.count({ where: { customerId: imported.customerId } }),
+		).toBe(before);
+	} finally {
+		releaseDeletion();
+		if (deletion) await deletion.catch(() => {});
+		if (assignment) await assignment.catch(() => {});
+		await db.member.upsert({
+			where: { id: member.id },
+			create: member,
+			update: {},
+		});
+	}
+});
+
+test("manager demotion waits for an authorized customer resolution", async () => {
+	const imported = await service.importOrder(
+		fixture("concurrent-manager-role"),
+		manager,
+		now,
+	);
+	await service.configureCustomer(
+		{ id: imported.customerId, enrolled: false, ownerId: actor, tags: [] },
+		manager,
+	);
+	await db.careCustomer.update({
+		where: { id: imported.customerId },
+		data: { openIssue: true },
+	});
+	const member = await db.member.findUniqueOrThrow({
+		where: {
+			organizationId_userId: { organizationId: "workspace", userId: manager },
+		},
+	});
+	let releaseResolution = () => {};
+	let signalResolutionPid = (_pid: number) => {};
+	let signalDemotionPid = (_pid: number) => {};
+	const release = new Promise<void>((resolve) => {
+		releaseResolution = resolve;
+	});
+	const resolutionPid = new Promise<number>((resolve) => {
+		signalResolutionPid = resolve;
+	});
+	const demotionPid = new Promise<number>((resolve) => {
+		signalDemotionPid = resolve;
+	});
+	let resolving: ReturnType<CustomerCareService["resolveCustomer"]> | undefined;
+	let demotion: Promise<unknown> | undefined;
+	try {
+		const isolated = new CustomerCareService(db);
+		const original = (
+			Reflect.get(isolated, "lockMembershipRole") as (
+				tx: Prisma.TransactionClient,
+				id: string,
+			) => Promise<unknown>
+		).bind(isolated);
+		Reflect.set(
+			isolated,
+			"lockMembershipRole",
+			async (tx: Prisma.TransactionClient, id: string) => {
+				const result = await original(tx, id);
+				if (id === manager) {
+					const rows = await tx.$queryRaw<
+						{ pid: number }[]
+					>`SELECT pg_backend_pid() AS pid`;
+					if (!rows[0]) throw new Error("Missing resolution backend PID");
+					signalResolutionPid(rows[0].pid);
+					await release;
+				}
+				return result;
+			},
+		);
+		resolving = isolated.resolveCustomer(
+			imported.customerId,
+			manager,
+			"Synthetic resolution",
+			null,
+		);
+		const blockerPid = await Promise.race([
+			resolutionPid,
+			resolving.then(() => {
+				throw new Error("Resolution ended before barrier");
+			}),
+		]);
+		demotion = db.$transaction(
+			async (tx) => {
+				const rows = await tx.$queryRaw<
+					{ pid: number }[]
+				>`SELECT pg_backend_pid() AS pid`;
+				if (!rows[0]) throw new Error("Missing demotion backend PID");
+				signalDemotionPid(rows[0].pid);
+				await tx.member.update({
+					where: { id: member.id },
+					data: { role: "member" },
+				});
+			},
+			{ timeout: 5000 },
+		);
+		const waiterPid = await Promise.race([
+			demotionPid,
+			demotion.then(() => {
+				throw new Error("Demotion ended before barrier");
+			}),
+		]);
+		await waitForDatabaseLock(waiterPid, blockerPid);
+		releaseResolution();
+		expect((await resolving).openIssue).toBe(false);
+		await demotion;
+		await expect(
+			service.resolveCustomer(
+				imported.customerId,
+				manager,
+				"Synthetic resolution",
+				null,
+			),
+		).rejects.toThrow("Khách thuộc nhân viên khác");
+	} finally {
+		releaseResolution();
+		if (resolving) await resolving.catch(() => {});
+		if (demotion) await demotion.catch(() => {});
+		await db.member.update({
+			where: { id: member.id },
+			data: { role: member.role },
+		});
+	}
+});
+
+test("resolution waiting for manager demotion rejects the new role", async () => {
+	const imported = await service.importOrder(
+		fixture("demotion-before-resolution"),
+		manager,
+		now,
+	);
+	await service.configureCustomer(
+		{ id: imported.customerId, enrolled: false, ownerId: actor, tags: [] },
+		manager,
+	);
+	await db.careCustomer.update({
+		where: { id: imported.customerId },
+		data: { openIssue: true },
+	});
+	const member = await db.member.findUniqueOrThrow({
+		where: {
+			organizationId_userId: { organizationId: "workspace", userId: manager },
+		},
+	});
+	const eventCount = await db.careEvent.count({
+		where: { customerId: imported.customerId },
+	});
+	let releaseDemotion = () => {};
+	let signalDemotion = (_pid: number) => {};
+	let signalResolution = (_pid: number) => {};
+	const release = new Promise<void>((resolve) => {
+		releaseDemotion = resolve;
+	});
+	const demotionPid = new Promise<number>((resolve) => {
+		signalDemotion = resolve;
+	});
+	const resolutionPid = new Promise<number>((resolve) => {
+		signalResolution = resolve;
+	});
+	let demotion: Promise<unknown> | undefined;
+	let resolving: Promise<{ allowed: boolean; error?: unknown }> | undefined;
+	try {
+		demotion = db.$transaction(
+			async (tx) => {
+				const rows = await tx.$queryRaw<
+					{ pid: number }[]
+				>`SELECT pg_backend_pid() AS pid`;
+				if (!rows[0]) throw new Error("Missing demotion backend PID");
+				await tx.member.update({
+					where: { id: member.id },
+					data: { role: "member" },
+				});
+				signalDemotion(rows[0].pid);
+				await release;
+			},
+			{ timeout: 5000 },
+		);
+		const blockerPid = await Promise.race([
+			demotionPid,
+			demotion.then(() => {
+				throw new Error("Demotion ended before barrier");
+			}),
+		]);
+		const isolated = new CustomerCareService(db);
+		const original = (
+			Reflect.get(isolated, "lockMembershipRole") as (
+				tx: Prisma.TransactionClient,
+				id: string,
+			) => Promise<unknown>
+		).bind(isolated);
+		Reflect.set(
+			isolated,
+			"lockMembershipRole",
+			async (tx: Prisma.TransactionClient, id: string) => {
+				const rows = await tx.$queryRaw<
+					{ pid: number }[]
+				>`SELECT pg_backend_pid() AS pid`;
+				if (!rows[0]) throw new Error("Missing resolution backend PID");
+				signalResolution(rows[0].pid);
+				return original(tx, id);
+			},
+		);
+		resolving = isolated
+			.resolveCustomer(
+				imported.customerId,
+				manager,
+				"Synthetic resolution",
+				null,
+			)
+			.then(
+				() => ({ allowed: true }),
+				(error: unknown) => ({ allowed: false, error }),
+			);
+		const waiterPid = await Promise.race([
+			resolutionPid,
+			resolving.then(() => {
+				throw new Error("Resolution ended before barrier");
+			}),
+		]);
+		await waitForDatabaseLock(waiterPid, blockerPid);
+		releaseDemotion();
+		await demotion;
+		const outcome = await resolving;
+		expect(outcome.allowed).toBe(false);
+		expect(outcome.error).toMatchObject({
+			status: 403,
+			message: "Khách thuộc nhân viên khác",
+		});
+		expect(
+			(
+				await db.careCustomer.findUniqueOrThrow({
+					where: { id: imported.customerId },
+				})
+			).openIssue,
+		).toBe(true);
+		expect(
+			await db.careEvent.count({ where: { customerId: imported.customerId } }),
+		).toBe(eventCount);
+	} finally {
+		releaseDemotion();
+		if (demotion) await demotion.catch(() => {});
+		if (resolving) await resolving.catch(() => {});
+		await db.member.update({
+			where: { id: member.id },
+			data: { role: member.role },
+		});
+	}
+});
+
 beforeAll(async () => {
 	if (!new URL(process.env.TEST_DATABASE_URL ?? "").pathname.endsWith("_test"))
 		throw new Error("Isolated test database required");

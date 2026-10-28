@@ -47,6 +47,7 @@ export function CareTemplates({ canManage }: { canManage: boolean }) {
 	const [excluded, setExcluded] = useState("");
 	const [expires, setExpires] = useState("");
 	const [editingId, setEditingId] = useState<string | undefined>();
+	const [editingVersion, setEditingVersion] = useState<number | undefined>();
 	const save = useMutation(
 		trpc.care.saveTemplate.mutationOptions({
 			onSuccess: async () => {
@@ -54,9 +55,13 @@ export function CareTemplates({ canManage }: { canManage: boolean }) {
 				setName("");
 				setBody("");
 				setEditingId(undefined);
+				setEditingVersion(undefined);
 				toast.success("Đã lưu bản nháp, cần duyệt trước khi dùng");
 			},
-			onError: (e) => toast.error(e.message),
+			onError: async (e) => {
+				toast.error(e.message);
+				await templates.refetch();
+			},
 		}),
 	);
 	const approve = useMutation(
@@ -73,6 +78,9 @@ export function CareTemplates({ canManage }: { canManage: boolean }) {
 			.split(",")
 			.map((t) => t.trim())
 			.filter(Boolean);
+	const hasDraft = Boolean(
+		editingId || name || body || required || excluded || expires,
+	);
 	return (
 		<div className="flex flex-col gap-4">
 			<Alert>
@@ -93,11 +101,22 @@ export function CareTemplates({ canManage }: { canManage: boolean }) {
 						</CardTitle>
 					</CardHeader>
 					<CardContent>
+						{save.isError && (
+							<Alert variant="destructive" role="alert">
+								<AlertTitle>Chưa lưu được mẫu</AlertTitle>
+								<AlertDescription>
+									{save.error.message} Bản đang soạn vẫn được giữ; hãy sao chép
+									nếu cần trước khi chọn tải mẫu mới, vì thao tác đó sẽ thay bản
+									đang soạn.
+								</AlertDescription>
+							</Alert>
+						)}
 						<form
 							onSubmit={(e) => {
 								e.preventDefault();
 								save.mutate({
 									id: editingId,
+									version: editingVersion,
 									brand,
 									purpose,
 									name,
@@ -238,8 +257,13 @@ export function CareTemplates({ canManage }: { canManage: boolean }) {
 								<Button
 									size="touch"
 									variant="outline"
+									disabled={
+										templates.isFetching || templates.isError || save.isPending
+									}
 									onClick={() => {
+										save.reset();
 										setEditingId(template.id);
+										setEditingVersion(template.version);
 										setBrand(template.brand);
 										setPurpose(template.purpose);
 										setName(template.name);
@@ -258,7 +282,9 @@ export function CareTemplates({ canManage }: { canManage: boolean }) {
 										);
 									}}
 								>
-									Chỉnh sửa nội dung
+									{hasDraft
+										? "Tải mẫu này (thay bản đang soạn)"
+										: "Chỉnh sửa nội dung"}
 								</Button>
 							)}
 							{canManage && (

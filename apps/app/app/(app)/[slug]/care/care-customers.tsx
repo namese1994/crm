@@ -338,6 +338,22 @@ function CustomerCard({
 	const cache = useCrmCache();
 	const [ownerId, setOwnerId] = useState(customer.ownerId ?? "");
 	const [tags, setTags] = useState(customer.tags.join(", "));
+	const [baseline, setBaseline] = useState(() => ({
+		enrolled: customer.enrolled,
+		ownerId: customer.ownerId,
+		tags: customer.tags,
+	}));
+	const stale =
+		customer.enrolled !== baseline.enrolled ||
+		customer.ownerId !== baseline.ownerId ||
+		JSON.stringify(customer.tags) !== JSON.stringify(baseline.tags);
+	const draftTags = tags
+		.split(",")
+		.map((tag) => tag.trim())
+		.filter(Boolean);
+	const draftDirty =
+		(ownerId || null) !== baseline.ownerId ||
+		JSON.stringify([...new Set(draftTags)]) !== JSON.stringify(baseline.tags);
 	const [resolution, setResolution] = useState("");
 	const resolve = useMutation(
 		trpc.care.resolveCustomer.mutationOptions({
@@ -352,11 +368,19 @@ function CustomerCard({
 	const users = useQuery(trpc.users.list.queryOptions());
 	const save = useMutation(
 		trpc.care.configureCustomer.mutationOptions({
-			onSuccess: async () => {
+			onSuccess: async (row) => {
+				setBaseline({
+					enrolled: row.enrolled,
+					ownerId: row.ownerId,
+					tags: row.tags,
+				});
 				await cache.care();
 				toast.success("Đã lưu phân công");
 			},
-			onError: (e) => toast.error(e.message),
+			onError: async (e) => {
+				toast.error(e.message);
+				await cache.care();
+			},
 		}),
 	);
 	return (
@@ -459,6 +483,31 @@ function CustomerCard({
 					)}
 				{canManage && (
 					<>
+						{stale && (
+							<Alert>
+								<AlertTitle>Dữ liệu đã thay đổi</AlertTitle>
+								<AlertDescription>
+									Phân công, tag hoặc trạng thái pilot đã được cập nhật ở nơi
+									khác. Bản sửa của bạn vẫn được giữ; hãy kiểm tra trước khi bỏ
+									bản sửa để tải dữ liệu mới.
+								</AlertDescription>
+								<Button
+									size="touch"
+									variant="outline"
+									onClick={() => {
+										setBaseline({
+											enrolled: customer.enrolled,
+											ownerId: customer.ownerId,
+											tags: customer.tags,
+										});
+										setOwnerId(customer.ownerId ?? "");
+										setTags(customer.tags.join(", "));
+									}}
+								>
+									Bỏ bản sửa và tải dữ liệu mới
+								</Button>
+							</Alert>
+						)}
 						<FieldGroup>
 							<Field>
 								<FieldLabel htmlFor={`owner-${customer.id}`}>
@@ -498,17 +547,15 @@ function CustomerCard({
 						</FieldGroup>
 						<Button
 							size="touch"
-							disabled={save.isPending}
+							disabled={save.isPending || stale}
 							variant="outline"
 							onClick={() =>
 								save.mutate({
 									id: customer.id,
 									ownerId: ownerId || null,
-									tags: tags
-										.split(",")
-										.map((t) => t.trim())
-										.filter(Boolean),
+									tags: draftTags,
 									enrolled: customer.enrolled,
+									expected: baseline,
 								})
 							}
 						>
@@ -516,22 +563,41 @@ function CustomerCard({
 						</Button>
 						<Button
 							size="touch"
-							disabled={save.isPending}
+							disabled={save.isPending || stale || draftDirty}
 							variant={customer.enrolled ? "outline" : "default"}
 							onClick={() =>
 								save.mutate({
 									id: customer.id,
-									ownerId: ownerId || null,
-									tags: tags
-										.split(",")
-										.map((t) => t.trim())
-										.filter(Boolean),
-									enrolled: !customer.enrolled,
+									ownerId: baseline.ownerId,
+									tags: baseline.tags,
+									enrolled: !baseline.enrolled,
+									expected: baseline,
 								})
 							}
 						>
 							{customer.enrolled ? "Dừng pilot cho khách" : "Đưa vào pilot"}
 						</Button>
+						{draftDirty && (
+							<div>
+								<p className="text-sm">
+									Lưu hoặc bỏ bản sửa phân công và tag trước khi thay đổi trạng
+									thái pilot.
+								</p>
+								{!stale && (
+									<Button
+										size="touch"
+										variant="outline"
+										disabled={save.isPending}
+										onClick={() => {
+											setOwnerId(baseline.ownerId ?? "");
+											setTags(baseline.tags.join(", "));
+										}}
+									>
+										Bỏ bản sửa phân công và tag
+									</Button>
+								)}
+							</div>
+						)}
 					</>
 				)}
 			</CardContent>

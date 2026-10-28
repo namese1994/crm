@@ -102,8 +102,18 @@ for (let index = 1; index <= 6; index++) {
 		actor,
 		now,
 	);
+	const expected = await db.careCustomer.findUniqueOrThrow({
+		where: { id: imported.customerId },
+		select: { enrolled: true, ownerId: true, tags: true },
+	});
 	await care.configureCustomer(
-		{ id: imported.customerId, enrolled: true, ownerId: actor, tags: ["demo"] },
+		{
+			id: imported.customerId,
+			enrolled: true,
+			ownerId: actor,
+			tags: ["demo"],
+			expected,
+		},
 		actor,
 	);
 }

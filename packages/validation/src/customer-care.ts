@@ -163,16 +163,27 @@ export const careImport = z
 		}
 	});
 
-export const careTemplateInput = z.object({
-	id: z.string().optional(),
-	brand: careBrand,
-	purpose: carePurpose,
-	name: z.string().trim().min(1).max(160),
-	body: z.string().trim().min(1).max(3000),
-	requiredTags: z.array(z.string().trim().min(1).max(80)).max(20),
-	excludedTags: z.array(z.string().trim().min(1).max(80)).max(20),
-	validUntil: instant.nullable(),
-});
+export const careTemplateInput = z
+	.object({
+		id: z.string().optional(),
+		version: z.number().int().positive().optional(),
+		brand: careBrand,
+		purpose: carePurpose,
+		name: z.string().trim().min(1).max(160),
+		body: z.string().trim().min(1).max(3000),
+		requiredTags: z.array(z.string().trim().min(1).max(80)).max(20),
+		excludedTags: z.array(z.string().trim().min(1).max(80)).max(20),
+		validUntil: instant.nullable(),
+	})
+	.superRefine((value, ctx) => {
+		if (value.id && value.version === undefined) {
+			ctx.addIssue({
+				code: "custom",
+				path: ["version"],
+				message: "Cần phiên bản mẫu để lưu chỉnh sửa",
+			});
+		}
+	});
 
 export const careCustomerListInput = z.object({
 	brand: careBrand.optional(),
@@ -212,6 +223,11 @@ export const careCustomerInput = z.object({
 	enrolled: z.boolean(),
 	ownerId: sourceId.nullable(),
 	tags: z.array(z.string().trim().min(1).max(80)).max(30),
+	expected: z.object({
+		enrolled: z.boolean(),
+		ownerId: sourceId.nullable(),
+		tags: z.array(z.string()).max(30),
+	}),
 });
 export type CareImport = z.infer<typeof careImport>;
 export type CareTemplateInput = z.infer<typeof careTemplateInput>;

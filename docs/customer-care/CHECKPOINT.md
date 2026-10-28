@@ -135,3 +135,28 @@ Current E/F technical evidence is recorded in VALIDATION.md. Real source/model p
 ## Heartbeat
 
 ID `ho-n-t-t-crm-ch-m-s-c-kh-ch-a-d` is PAUSED at Nam's request. Continue authorized work manually. A general “TIẾP” instruction does not resume this schedule. Resume the heartbeat only after Nam explicitly requests resuming it. D02/D03 acceptance remains open.
+
+## Staging deployment 2026-10-28
+
+- Deployed web artifact built by GitHub Actions run 40659067769 from commit `2723d8c12b232fd58eb65fb49a3e4e782ce541c0`; verified GitHub artifact digest, archive checksum and embedded revision. API and care worker were built locally from application code at `78dfae7` (the later commit adds only the build workflow).
+- Tested Next startup in an isolated directory on port 3212 with synthetic configuration before cutover. After cutover, web, API and care worker are online; public URL returned HTTP 200. The previously running artifacts remain in `.scratch/deploy-backup-2723d8c` for rollback. Demo source refresh remains stopped.
+- Authenticated browser read-only verification after deploy: care page loads the new guided onboarding, summary and customer search/filter tabs; source warning for incomplete Li En Sport conversation pagination remains. Independent QA verified processes, unauthenticated redirect and API 401; it could not access the authenticated browser session. No real customer enrollment, approval or message was performed.
+- This is staging verification, not real-pilot acceptance or production readiness. Physical Android and real source acceptance remain pending; do not treat source warning as resolved.
+
+## Follow-up review 2026-10-28
+
+- Independent review identified lost updates when managers edit the same customer care configuration or template concurrently. Fixes and synthetic regression tests are in the working tree; these changes have NOT been deployed. Independent review is in progress, including preserving draft UI on conflicts.
+- GitHub CI run 40659068316 failed at `bun audit` on seven dependency advisories, including one critical and two high; it did not complete the later CI checks. Better Auth 1.6.33 is in affected ranges. Source review did not find the Magic Link or OAuth Proxy plugins required by the specific critical/high advisory paths, but this does not certify the deployed runtime or resolve the audit. Check current versions, exploitability and upgrade compatibility; do not declare production readiness or bypass the audit.
+- The prior deployed revision is `2723d8c`. Preserve unrelated modifications and run DB-backed tests sequentially against the test DB, not staging.
+
+## Concurrency follow-up QA
+
+- Independent code review rechecked customer configuration and template compare-and-swap, draft preservation, and the guard against changing pilot status with unsaved edits. Browser two-session verification is still pending; fixes have not been deployed.
+- Review found `tools/customer-care/seed-demo.ts` needed the new expected customer snapshot. Updated the demo-only caller; targeted Biome and worker TypeScript checks passed. The seed was not run against the shared test or staging database because it creates demo records and a session.
+- Previous synthetic CRM integration run: 63 tests / 255 assertions before an additional concurrent-customer test; the two targeted customer tests including that case passed 2 tests / 9 assertions. Do not describe this as a fresh full 64-test run.
+
+## Concurrency regression evidence
+
+- CRM integration suite on the test database passed 64 tests / 260 assertions. A later assertion-only improvement passed its focused concurrency case (1 test / 6 assertions). API, app and care-worker TypeScript checks and targeted Biome passed.
+- Independent browser QA used the real changed components and a shared synthetic mock API in two pages at 390px: stale customer/template writes returned conflicts and retained drafts; unsaved assignment edits blocked pilot toggle under a filter. No database or live account was used. Evidence: `.scratch/cas-two-session-qa/result.json` and `check.cjs`. This does not prove physical Android, two real accounts, or live source behavior.
+- These fixes are not yet deployed. The existing `better-auth` dependency audit warnings and incomplete Li En Sport source remain open.

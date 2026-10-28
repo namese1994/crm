@@ -10,7 +10,24 @@ import type { MiddlewareOptions } from "nestjs-trpc";
 import { CareMembershipMiddleware } from "../src/customer-care/care-membership.middleware";
 import { CustomerCareService } from "../src/customer-care/customer-care.service";
 
-const service = new CustomerCareService(db);
+type CustomerConfig = Parameters<CustomerCareService["configureCustomer"]>[0];
+class TestCustomerCareService extends CustomerCareService {
+	override async configureCustomer(
+		input: Omit<CustomerConfig, "expected"> & {
+			expected?: CustomerConfig["expected"];
+		},
+		actorId: string,
+	) {
+		const expected =
+			input.expected ??
+			(await db.careCustomer.findUniqueOrThrow({
+				where: { id: input.id },
+				select: { enrolled: true, ownerId: true, tags: true },
+			}));
+		return super.configureCustomer({ ...input, expected }, actorId);
+	}
+}
+const service = new TestCustomerCareService(db);
 const prefix = `care-${crypto.randomUUID()}`;
 const actor = `${prefix}-staff`;
 const manager = `${prefix}-manager`;
@@ -59,6 +76,96 @@ test("future conversation activity cannot manufacture a fresh source check", asy
 	await expect(service.importOrder(input, manager, now)).rejects.toThrow(
 		"Dữ liệu nguồn có thời điểm trong tương lai",
 	);
+});
+
+test("stale customer configuration cannot overwrite another manager's changes", async () => {
+	const imported = await service.importOrder(
+		fixture("stale-config"),
+		manager,
+		now,
+	);
+	const expected = await db.careCustomer.findUniqueOrThrow({
+		where: { id: imported.customerId },
+		select: { enrolled: true, ownerId: true, tags: true },
+	});
+	await service.configureCustomer(
+		{
+			id: imported.customerId,
+			enrolled: true,
+			ownerId: actor,
+			tags: ["new-tag"],
+			expected,
+		},
+		manager,
+	);
+	const eventsBefore = await db.careEvent.count({
+		where: { customerId: imported.customerId },
+	});
+	for (const enrolled of [false, true]) {
+		await expect(
+			service.configureCustomer(
+				{
+					id: imported.customerId,
+					enrolled,
+					ownerId: null,
+					tags: ["old-draft"],
+					expected,
+				},
+				manager,
+			),
+		).rejects.toThrow("đã thay đổi");
+	}
+	const after = await db.careCustomer.findUniqueOrThrow({
+		where: { id: imported.customerId },
+		select: { enrolled: true, ownerId: true, tags: true },
+	});
+	expect(after).toEqual({ enrolled: true, ownerId: actor, tags: ["new-tag"] });
+	expect(
+		await db.careEvent.count({ where: { customerId: imported.customerId } }),
+	).toBe(eventsBefore);
+});
+
+test("concurrent customer configuration changes from one snapshot have one winner", async () => {
+	const imported = await service.importOrder(
+		fixture("concurrent-config"),
+		manager,
+		now,
+	);
+	const expected = await db.careCustomer.findUniqueOrThrow({
+		where: { id: imported.customerId },
+		select: { enrolled: true, ownerId: true, tags: true },
+	});
+	const updates = await Promise.allSettled(
+		["first", "second"].map((tag) =>
+			service.configureCustomer(
+				{
+					id: imported.customerId,
+					enrolled: false,
+					ownerId: actor,
+					tags: [tag],
+					expected,
+				},
+				manager,
+			),
+		),
+	);
+	expect(
+		updates.filter((result) => result.status === "fulfilled"),
+	).toHaveLength(1);
+	const rejected = updates.filter((result) => result.status === "rejected");
+	expect(rejected).toHaveLength(1);
+	expect(rejected[0]?.reason).toMatchObject({ status: 409 });
+	const after = await db.careCustomer.findUniqueOrThrow({
+		where: { id: imported.customerId },
+		select: { tags: true },
+	});
+	expect(after.tags).toHaveLength(1);
+	expect(["first", "second"]).toContain(after.tags[0] ?? "");
+	expect(
+		await db.careEvent.count({
+			where: { customerId: imported.customerId, kind: "CUSTOMER_CONFIGURED" },
+		}),
+	).toBe(1);
 });
 
 async function enrolled(key: string) {
@@ -665,6 +772,88 @@ test("customer assignment rejects a manager demoted to member", async () => {
 	}
 });
 
+test("a stale editor cannot overwrite a newer approved template", async () => {
+	const input = {
+		brand: "UMEHA" as const,
+		purpose: "CHECK_IN" as const,
+		name: `${prefix}-stale-editor`,
+		body: "Bản đầu {{customer}}",
+		requiredTags: ["stale-editor-only"],
+		excludedTags: [],
+		validUntil: null,
+	};
+	const original = await service.saveTemplate(input, manager);
+	const edited = await service.saveTemplate(
+		{
+			...input,
+			id: original.id,
+			version: original.version,
+			body: "Bản mới {{customer}}",
+		},
+		manager,
+	);
+	const approved = await service.approveTemplate(
+		edited.id,
+		manager,
+		true,
+		edited.version,
+	);
+	await expect(
+		service.saveTemplate(
+			{
+				...input,
+				id: original.id,
+				version: original.version,
+				body: "Bản cũ {{customer}}",
+			},
+			manager,
+		),
+	).rejects.toThrow("Mẫu đã thay đổi");
+	await expect(
+		service.saveTemplate({ ...input, id: original.id }, manager),
+	).rejects.toThrow("Cần phiên bản mẫu");
+	const after = await db.careTemplate.findUniqueOrThrow({
+		where: { id: original.id },
+	});
+	expect(after.body).toBe(approved.body);
+	expect(after.version).toBe(approved.version);
+	expect(after.approvedAt).not.toBeNull();
+	expect(after.approvedBy).toBe(manager);
+});
+
+test("concurrent template edits from the same version have one winner", async () => {
+	const input = {
+		brand: "UMEHA" as const,
+		purpose: "CHECK_IN" as const,
+		name: `${prefix}-concurrent-edit`,
+		body: "Bản đầu {{customer}}",
+		requiredTags: ["concurrent-editor-only"],
+		excludedTags: [],
+		validUntil: null,
+	};
+	const original = await service.saveTemplate(input, manager);
+	const results = await Promise.allSettled(
+		["A {{customer}}", "B {{customer}}"].map((body) =>
+			service.saveTemplate(
+				{ ...input, id: original.id, version: original.version, body },
+				manager,
+			),
+		),
+	);
+	const fulfilled = results.filter((result) => result.status === "fulfilled");
+	const rejected = results.filter((result) => result.status === "rejected");
+	expect(fulfilled).toHaveLength(1);
+	expect(rejected).toHaveLength(1);
+	const after = await db.careTemplate.findUniqueOrThrow({
+		where: { id: original.id },
+	});
+	expect(after.version).toBe(original.version + 1);
+	expect(
+		fulfilled[0]?.status === "fulfilled" &&
+			after.body === fulfilled[0].value.body,
+	).toBe(true);
+});
+
 test("a demoted manager cannot edit or approve a template", async () => {
 	const input = {
 		brand: "UMEHA" as const,
@@ -1021,7 +1210,7 @@ test("assignment waiting for owner removal fails without changing customer", asy
 				throw new Error("Deletion ended before barrier");
 			}),
 		]);
-		const isolated = new CustomerCareService(db);
+		const isolated = new TestCustomerCareService(db);
 		const original = (
 			Reflect.get(isolated, "lockMembershipRole") as (
 				tx: Prisma.TransactionClient,

@@ -4,10 +4,30 @@ import {
 	careBlock,
 	careDueAt,
 	careStep,
+	careTemplateInput,
 	renderCareTemplate,
 } from "../src/customer-care";
 
 describe("care rules", () => {
+	test("template edits require the version that was opened", () => {
+		const draft = {
+			brand: "UMEHA",
+			purpose: "CHECK_IN",
+			name: "Mẫu",
+			body: "Chào",
+			requiredTags: [],
+			excludedTags: [],
+			validUntil: null,
+		};
+		expect(careTemplateInput.safeParse(draft).success).toBe(true);
+		expect(
+			careTemplateInput.safeParse({ ...draft, id: "template" }).success,
+		).toBe(false);
+		expect(
+			careTemplateInput.safeParse({ ...draft, id: "template", version: 1 })
+				.success,
+		).toBe(true);
+	});
 	test("D+x uses Vietnam calendar day at 09:00", () => {
 		expect(careDueAt(new Date("2026-10-26T18:00:00Z"), 1).toISOString()).toBe(
 			"2026-10-28T02:00:00.000Z",

@@ -409,6 +409,14 @@ export class CustomerCareService {
 			const previous = await tx.careCustomer.findUniqueOrThrow({
 				where: { id: input.id },
 			});
+			if (
+				previous.enrolled !== input.expected.enrolled ||
+				previous.ownerId !== input.expected.ownerId ||
+				JSON.stringify(previous.tags) !== JSON.stringify(input.expected.tags)
+			)
+				throw new ConflictException(
+					"Phân công, tag hoặc trạng thái pilot đã thay đổi. Tải lại dữ liệu trước khi lưu.",
+				);
 			const row = await tx.careCustomer.update({
 				where: { id: input.id },
 				data: {
@@ -1070,7 +1078,7 @@ export class CustomerCareService {
 				"Biến được hỗ trợ: customer, product, brand",
 			);
 		}
-		const { id, validUntil, ...data } = input;
+		const { id, version, validUntil, ...data } = input;
 		const values = {
 			...data,
 			validUntil: validUntil ? new Date(validUntil) : null,
@@ -1079,12 +1087,18 @@ export class CustomerCareService {
 		};
 		return this.db.$transaction(async (tx) => {
 			await this.requireLockedManager(tx, actorId);
-			return id
-				? tx.careTemplate.update({
-						where: { id },
-						data: { ...values, version: { increment: 1 } },
-					})
-				: tx.careTemplate.create({ data: values });
+			if (!id) return tx.careTemplate.create({ data: values });
+			if (version === undefined)
+				throw new BadRequestException("Cần phiên bản mẫu để lưu chỉnh sửa");
+			const changed = await tx.careTemplate.updateMany({
+				where: { id, version },
+				data: { ...values, version: { increment: 1 } },
+			});
+			if (changed.count !== 1)
+				throw new ConflictException(
+					"Mẫu đã thay đổi; giữ lại nội dung đang soạn rồi chọn lại mẫu để xem phiên bản mới",
+				);
+			return tx.careTemplate.findUniqueOrThrow({ where: { id } });
 		});
 	}
 

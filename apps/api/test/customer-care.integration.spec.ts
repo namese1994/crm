@@ -1,7 +1,7 @@
 import "reflect-metadata";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { db, type Prisma } from "@crm/db";
-import type { CareImport } from "@crm/validation/customer-care";
+import { CARE, type CareImport } from "@crm/validation/customer-care";
 import type { MiddlewareOptions } from "nestjs-trpc";
 import { CareMembershipMiddleware } from "../src/customer-care/care-membership.middleware";
 import { CustomerCareService } from "../src/customer-care/customer-care.service";
@@ -2276,6 +2276,212 @@ test("template revocation waits for an authorized manual confirmation", async ()
 		if (confirmation) await confirmation.catch(() => {});
 		if (revocation) await revocation.catch(() => {});
 	}
+});
+
+test.each(["template", "customer", "conversation"] as const)(
+	"manual confirmation rejects %s expiry during template lock",
+	async (expiry) => {
+		const task = await enrolled(`confirm-expired-${expiry}`);
+		const tag = `confirm-expired-${expiry}`;
+		await service.configureCustomer(
+			{ id: task.customerId, enrolled: true, ownerId: actor, tags: [tag] },
+			manager,
+		);
+		const draft = await service.saveTemplate(
+			{
+				brand: "UMEHA",
+				purpose: "CHECK_IN",
+				name: `${prefix}-${tag}`,
+				body: "Chào {{customer}}",
+				requiredTags: [tag],
+				excludedTags: [],
+				validUntil: null,
+			},
+			manager,
+		);
+		await service.approveTemplate(draft.id, manager, true, draft.version);
+		await service.claim(task.id, actor, now);
+		const copied = await service.copy(task.id, actor, now);
+		if (expiry === "template") {
+			await db.careTemplate.update({
+				where: { id: draft.id },
+				data: { validUntil: new Date(now.getTime() + 100) },
+			});
+		} else if (expiry === "customer") {
+			const nearlyStale = new Date(now.getTime() - CARE.freshMs + 100);
+			await db.careCustomer.update({
+				where: { id: task.customerId },
+				data: { syncedAt: nearlyStale },
+			});
+		} else {
+			const nearlyStale = new Date(now.getTime() - CARE.freshMs + 100);
+			await db.careConversation.updateMany({
+				where: { customerId: task.customerId },
+				data: { activityVerifiedAt: nearlyStale, verifiedAt: nearlyStale },
+			});
+		}
+		const isolated = new CustomerCareService(db);
+		const original = (
+			Reflect.get(isolated, "lockTemplate") as (
+				tx: Prisma.TransactionClient,
+				id: string,
+			) => Promise<void>
+		).bind(isolated);
+		Reflect.set(
+			isolated,
+			"lockTemplate",
+			async (tx: Prisma.TransactionClient, id: string) => {
+				await original(tx, id);
+				await new Promise((resolve) => setTimeout(resolve, 250));
+			},
+		);
+		await expect(
+			isolated.action(
+				{
+					id: task.id,
+					version: copied.version,
+					result: "SENT_MANUAL",
+					reason: "Synthetic test",
+				},
+				actor,
+				now,
+			),
+		).rejects.toMatchObject({
+			status: 409,
+			message:
+				expiry === "template"
+					? "Mẫu đã thay đổi hoặc hết hiệu lực"
+					: "Cần đồng bộ dữ liệu mới trước khi liên hệ",
+		});
+		const after = await db.careTask.findUniqueOrThrow({
+			where: { id: task.id },
+		});
+		expect(after.state).toBe("COPIED");
+		expect(after.snapshot).toBe(copied.text);
+		expect(after.confirmedAt).toBeNull();
+		expect(
+			await db.careEvent.count({
+				where: { taskId: task.id, kind: "SENT_MANUAL" },
+			}),
+		).toBe(0);
+	},
+);
+
+test.each(["customer", "conversation"] as const)(
+	"copy rejects %s freshness expiry during template lock",
+	async (source) => {
+		const tag = `copy-expired-${source}`;
+		const task = await enrolled(tag);
+		await service.configureCustomer(
+			{ id: task.customerId, enrolled: true, ownerId: actor, tags: [tag] },
+			manager,
+		);
+		const draft = await service.saveTemplate(
+			{
+				brand: "UMEHA",
+				purpose: "CHECK_IN",
+				name: `${prefix}-${tag}`,
+				body: "Chào {{customer}}",
+				requiredTags: [tag],
+				excludedTags: [],
+				validUntil: null,
+			},
+			manager,
+		);
+		await service.approveTemplate(draft.id, manager, true, draft.version);
+		await service.claim(task.id, actor, now);
+		const nearlyStale = new Date(now.getTime() - CARE.freshMs + 100);
+		if (source === "customer") {
+			await db.careCustomer.update({
+				where: { id: task.customerId },
+				data: { syncedAt: nearlyStale },
+			});
+		} else {
+			await db.careConversation.updateMany({
+				where: { customerId: task.customerId },
+				data: { activityVerifiedAt: nearlyStale, verifiedAt: nearlyStale },
+			});
+		}
+		const isolated = new CustomerCareService(db);
+		const original = (
+			Reflect.get(isolated, "lockTemplate") as (
+				tx: Prisma.TransactionClient,
+				id: string,
+			) => Promise<void>
+		).bind(isolated);
+		Reflect.set(
+			isolated,
+			"lockTemplate",
+			async (tx: Prisma.TransactionClient, id: string) => {
+				await original(tx, id);
+				await new Promise((resolve) => setTimeout(resolve, 250));
+			},
+		);
+		await expect(isolated.copy(task.id, actor, now)).rejects.toMatchObject({
+			status: 409,
+			message: "Cần đồng bộ dữ liệu mới trước khi liên hệ",
+		});
+		const after = await db.careTask.findUniqueOrThrow({
+			where: { id: task.id },
+		});
+		expect(after.state).toBe("CLAIMED");
+		expect(after.snapshot).toBeNull();
+		expect(
+			await db.careEvent.count({
+				where: { taskId: task.id, kind: "COPY_PREPARED" },
+			}),
+		).toBe(0);
+	},
+);
+
+test("copy rejects a template that expires while its row is locked", async () => {
+	const task = await enrolled("copy-expired-template");
+	const tag = "copy-expired-template";
+	await service.configureCustomer(
+		{ id: task.customerId, enrolled: true, ownerId: actor, tags: [tag] },
+		manager,
+	);
+	const draft = await service.saveTemplate(
+		{
+			brand: "UMEHA",
+			purpose: "CHECK_IN",
+			name: `${prefix}-copy-expired-template`,
+			body: "Chào {{customer}}",
+			requiredTags: [tag],
+			excludedTags: [],
+			validUntil: new Date(now.getTime() + 100).toISOString(),
+		},
+		manager,
+	);
+	await service.approveTemplate(draft.id, manager, true, draft.version);
+	await service.claim(task.id, actor, now);
+	const isolated = new CustomerCareService(db);
+	const original = (
+		Reflect.get(isolated, "lockTemplate") as (
+			tx: Prisma.TransactionClient,
+			id: string,
+		) => Promise<void>
+	).bind(isolated);
+	Reflect.set(
+		isolated,
+		"lockTemplate",
+		async (tx: Prisma.TransactionClient, id: string) => {
+			await original(tx, id);
+			await new Promise((resolve) => setTimeout(resolve, 250));
+		},
+	);
+	await expect(isolated.copy(task.id, actor, now)).rejects.toMatchObject({
+		status: 409,
+		message: "Mẫu đã thay đổi hoặc hết hiệu lực",
+	});
+	const after = await db.careTask.findUniqueOrThrow({ where: { id: task.id } });
+	expect(after.state).toBe("CLAIMED");
+	expect(after.snapshot).toBeNull();
+	expect(
+		await db.careEvent.count({
+			where: { taskId: task.id, kind: "COPY_PREPARED" },
+		}),
+	).toBe(0);
 });
 
 test("successful copy and confirmation timestamps include time spent waiting", async () => {

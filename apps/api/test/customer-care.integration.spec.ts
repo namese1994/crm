@@ -1,7 +1,11 @@
 import "reflect-metadata";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { db, type Prisma } from "@crm/db";
-import { CARE, type CareImport } from "@crm/validation/customer-care";
+import {
+	CARE,
+	type CareImport,
+	careDueAt,
+} from "@crm/validation/customer-care";
 import type { MiddlewareOptions } from "nestjs-trpc";
 import { CareMembershipMiddleware } from "../src/customer-care/care-membership.middleware";
 import { CustomerCareService } from "../src/customer-care/customer-care.service";
@@ -2483,6 +2487,196 @@ test("copy rejects a template that expires while its row is locked", async () =>
 		}),
 	).toBe(0);
 });
+
+test.each(["copy", "confirmation"] as const)(
+	"%s rejects channel sync freshness expiry during template lock",
+	async (operation) => {
+		const tag = `channel-boundary-${operation}`;
+		const input = fixture(tag);
+		input.conversation.pageId = `${prefix}-${tag}`;
+		const imported = await service.importOrder(input, manager, now);
+		const sourceId = `UMEHA:test-shop:${input.conversation.pageId}`;
+		await service.configureCustomer(
+			{ id: imported.customerId, enrolled: true, ownerId: actor, tags: [tag] },
+			manager,
+		);
+		await service.tick(now);
+		const task = await db.careTask.findFirstOrThrow({
+			where: { customerId: imported.customerId },
+		});
+		const draft = await service.saveTemplate(
+			{
+				brand: "UMEHA",
+				purpose: "CHECK_IN",
+				name: `${prefix}-${tag}`,
+				body: "Chào {{customer}}",
+				requiredTags: [tag],
+				excludedTags: [],
+				validUntil: null,
+			},
+			manager,
+		);
+		await service.approveTemplate(draft.id, manager, true, draft.version);
+		await db.careSyncState.create({
+			data: { id: sourceId, lastSuccessAt: now },
+		});
+		try {
+			await service.claim(task.id, actor, now);
+			const copied =
+				operation === "confirmation"
+					? await service.copy(task.id, actor, now)
+					: null;
+			await db.careSyncState.update({
+				where: { id: sourceId },
+				data: { lastSuccessAt: new Date(now.getTime() - CARE.freshMs + 100) },
+			});
+			const isolated = new CustomerCareService(db);
+			const original = (
+				Reflect.get(isolated, "lockTemplate") as (
+					tx: Prisma.TransactionClient,
+					id: string,
+				) => Promise<void>
+			).bind(isolated);
+			Reflect.set(
+				isolated,
+				"lockTemplate",
+				async (tx: Prisma.TransactionClient, id: string) => {
+					await original(tx, id);
+					await new Promise((resolve) => setTimeout(resolve, 250));
+				},
+			);
+			const attempt = copied
+				? isolated.action(
+						{
+							id: task.id,
+							version: copied.version,
+							result: "SENT_MANUAL",
+							reason: "Synthetic test",
+						},
+						actor,
+						now,
+					)
+				: isolated.copy(task.id, actor, now);
+			await expect(attempt).rejects.toMatchObject({
+				status: 409,
+				message: "Chưa xác minh lượt đồng bộ gần đây",
+			});
+			const after = await db.careTask.findUniqueOrThrow({
+				where: { id: task.id },
+			});
+			expect(after.state).toBe(copied ? "COPIED" : "CLAIMED");
+			expect(after.snapshot).toBe(copied?.text ?? null);
+			expect(after.confirmedAt).toBeNull();
+			expect(
+				await db.careEvent.count({
+					where: { taskId: task.id, kind: "SENT_MANUAL" },
+				}),
+			).toBe(0);
+			if (!copied)
+				expect(
+					await db.careEvent.count({
+						where: { taskId: task.id, kind: "COPY_PREPARED" },
+					}),
+				).toBe(0);
+		} finally {
+			await db.careSyncState.deleteMany({ where: { id: sourceId } });
+		}
+	},
+);
+
+test.each(["copy", "confirmation"] as const)(
+	"%s rejects a D+x milestone change while waiting on a template",
+	async (operation) => {
+		const tag = `milestone-boundary-${operation}`;
+		const task = await enrolled(tag);
+		expect(task.milestone).toBe(1);
+		await service.configureCustomer(
+			{ id: task.customerId, enrolled: true, ownerId: actor, tags: [tag] },
+			manager,
+		);
+		const order = await db.careOrder.findUniqueOrThrow({
+			where: { id: task.orderId },
+		});
+		if (!order.deliveredAt)
+			throw new Error("Synthetic order must have delivery date");
+		const boundary = new Date(careDueAt(order.deliveredAt, 5).getTime() - 100);
+		const before = new Date(boundary.getTime() - 1000);
+		await db.careCustomer.update({
+			where: { id: task.customerId },
+			data: { syncedAt: before },
+		});
+		await db.careConversation.updateMany({
+			where: { customerId: task.customerId },
+			data: { activityVerifiedAt: before, verifiedAt: before },
+		});
+		const draft = await service.saveTemplate(
+			{
+				brand: "UMEHA",
+				purpose: "CHECK_IN",
+				name: `${prefix}-${tag}`,
+				body: "Chào {{customer}}",
+				requiredTags: [tag],
+				excludedTags: [],
+				validUntil: null,
+			},
+			manager,
+		);
+		await service.approveTemplate(draft.id, manager, true, draft.version);
+		await service.claim(task.id, actor, before);
+		const copied =
+			operation === "confirmation"
+				? await service.copy(task.id, actor, before)
+				: null;
+		const isolated = new CustomerCareService(db);
+		const original = (
+			Reflect.get(isolated, "lockTemplate") as (
+				tx: Prisma.TransactionClient,
+				id: string,
+			) => Promise<void>
+		).bind(isolated);
+		Reflect.set(
+			isolated,
+			"lockTemplate",
+			async (tx: Prisma.TransactionClient, id: string) => {
+				await original(tx, id);
+				await new Promise((resolve) => setTimeout(resolve, 250));
+			},
+		);
+		const attempt = copied
+			? isolated.action(
+					{
+						id: task.id,
+						version: copied.version,
+						result: "SENT_MANUAL",
+						reason: "Synthetic test",
+					},
+					actor,
+					boundary,
+				)
+			: isolated.copy(task.id, actor, boundary);
+		await expect(attempt).rejects.toMatchObject({
+			status: 409,
+			message: "Đơn hoặc mốc chăm sóc đã thay đổi",
+		});
+		const after = await db.careTask.findUniqueOrThrow({
+			where: { id: task.id },
+		});
+		expect(after.state).toBe(copied ? "COPIED" : "CLAIMED");
+		expect(after.snapshot).toBe(copied?.text ?? null);
+		expect(after.confirmedAt).toBeNull();
+		expect(
+			await db.careEvent.count({
+				where: { taskId: task.id, kind: "SENT_MANUAL" },
+			}),
+		).toBe(0);
+		if (!copied)
+			expect(
+				await db.careEvent.count({
+					where: { taskId: task.id, kind: "COPY_PREPARED" },
+				}),
+			).toBe(0);
+	},
+);
 
 test("successful copy and confirmation timestamps include time spent waiting", async () => {
 	const task = await enrolled("template-wait-timestamps");

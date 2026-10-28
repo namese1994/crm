@@ -56,13 +56,13 @@ function SelectTrigger({
 	...props
 }: React.ComponentProps<typeof SelectPrimitive.Trigger> &
 	VariantProps<typeof selectTriggerVariants> & {
-		size?: "sm" | "default";
+		size?: "sm" | "default" | "touch";
 	}) {
 	return (
 		<SelectPrimitive.Trigger
 			data-slot="select-trigger"
 			data-size={size}
-			className={cn(selectTriggerVariants({ variant }), className)}
+			className={cn(selectTriggerVariants({ variant }), "data-[size=touch]:min-h-11 data-[size=touch]:text-sm", className)}
 			{...props}
 		>
 			{children}

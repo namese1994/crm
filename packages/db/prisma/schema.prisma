@@ -2,6 +2,257 @@ datasource db {
   provider = "postgresql"
 }
 
+enum CareIntegrationKind {
+  POSCAKE
+  LLM
+}
+
+enum CareJobState {
+  PENDING
+  RUNNING
+  DONE
+  FAILED
+  IGNORED
+}
+
+model CareIntegration {
+  id               String @id
+  kind             CareIntegrationKind @unique
+  name             String
+  config           Json
+  secrets          String
+  version          Int @default(1)
+  enabled          Boolean @default(false)
+  checkedVersion   Int?
+  checkRequestedAt DateTime?
+  lastCheckedAt    DateTime?
+  lastError        String?
+  lastWebhookAt    DateTime?
+  createdBy        String
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  webhooks         CareWebhookReceipt[]
+  aiJobs           CareAiJob[]
+
+  @@map("careIntegration")
+}
+
+model CareWebhookReceipt {
+  id            String @id @default(cuid())
+  integrationId String
+  integration   CareIntegration @relation(fields: [integrationId], references: [id], onDelete: Restrict)
+  eventKey      String
+  eventType     String
+  shopId        String
+  orderId       String
+  state         CareJobState @default(PENDING)
+  attempts      Int @default(0)
+  nextAttemptAt DateTime @default(now())
+  leaseToken    String?
+  leaseUntil    DateTime?
+  lastError     String?
+  receivedAt    DateTime @default(now())
+  finishedAt    DateTime?
+
+  @@unique([integrationId, eventKey])
+  @@index([state, nextAttemptAt])
+  @@map("careWebhookReceipt")
+}
+
+model CareAiJob {
+  id            String @id @default(cuid())
+  integrationId String
+  integration   CareIntegration @relation(fields: [integrationId], references: [id], onDelete: Restrict)
+  configVersion Int
+  requestId     String
+  createdBy     String
+  input         Json
+  result        Json?
+  state         CareJobState @default(PENDING)
+  leaseToken    String?
+  leaseUntil    DateTime?
+  lastError     String?
+  model         String
+  inputTokens   Int?
+  outputTokens  Int?
+  createdAt     DateTime @default(now())
+  finishedAt    DateTime?
+
+  @@unique([createdBy, requestId])
+  @@index([state, createdAt])
+  @@map("careAiJob")
+}
+
+enum CareBrand {
+  UMEHA
+  LI_EN_SPORT
+}
+
+enum CareOrderStatus {
+  PENDING
+  DELIVERED
+  PARTIAL
+  CANCELLED
+  RETURNED
+}
+
+enum CareTaskState {
+  OPEN
+  CLAIMED
+  COPIED
+  WAITING
+  DONE
+  CANCELLED
+}
+
+enum CarePurpose {
+  CHECK_IN
+  USE_VALUE
+  EXPERIENCE
+  REORDER
+  REACTIVATE
+  REVIEW
+}
+
+model CareCustomer {
+  id                     String @id @default(cuid())
+  brand                  CareBrand
+  shopId                 String
+  sourceCustomerId       String
+  name                   String
+  tags                   String[] @default([])
+  ownerId                String?
+  enrolled               Boolean @default(false)
+  optedOut               Boolean @default(false)
+  openIssue              Boolean @default(false)
+  uncertain              Boolean @default(false)
+  replyPending           Boolean @default(false)
+  pausedUntil            DateTime?
+  lastTouchAt            DateTime?
+  unanswered             Int @default(0)
+  syncedAt               DateTime
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+  orders                 CareOrder[]
+  conversations          CareConversation[]
+  tasks                  CareTask[]
+  events                 CareEvent[]
+
+  @@unique([brand, shopId, sourceCustomerId])
+  @@index([enrolled, ownerId])
+  @@map("careCustomer")
+}
+
+model CareOrder {
+  id                String @id @default(cuid())
+  customerId        String
+  customer          CareCustomer @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  sourceOrderId     String
+  status            CareOrderStatus
+  deliveredAt       DateTime?
+  deliveryEvidence  String?
+  products          Json
+  sourceCreatedAt   DateTime
+  sourceUpdatedAt   DateTime
+  createdAt         DateTime @default(now())
+  tasks             CareTask[]
+
+  @@unique([customerId, sourceOrderId])
+  @@index([customerId, deliveredAt])
+  @@map("careOrder")
+}
+
+model CareConversation {
+  id                 String @id @default(cuid())
+  customerId         String
+  customer           CareCustomer @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  pageId             String
+  sourceId           String
+  lastInboundAt      DateTime?
+  lastOutboundAt     DateTime?
+  verifiedAt         DateTime
+  activityVerifiedAt DateTime?
+  canSend            Boolean?
+
+  @@unique([pageId, sourceId])
+  @@index([customerId])
+  @@map("careConversation")
+}
+
+model CareTemplate {
+  id              String @id @default(cuid())
+  brand           CareBrand
+  purpose         CarePurpose
+  name            String
+  body            String
+  requiredTags    String[] @default([])
+  excludedTags    String[] @default([])
+  validUntil      DateTime?
+  version         Int @default(1)
+  approvedAt      DateTime?
+  approvedBy      String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([brand, purpose, approvedAt])
+  @@map("careTemplate")
+}
+
+model CareTask {
+  id              String @id @default(cuid())
+  customerId      String
+  customer        CareCustomer @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  orderId         String
+  order           CareOrder @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  milestone       Int
+  purpose         CarePurpose
+  dueAt           DateTime
+  state           CareTaskState @default(OPEN)
+  ownerId         String?
+  leaseUntil      DateTime?
+  version         Int @default(0)
+  templateId      String?
+  templateVersion Int?
+  snapshot        String?
+  copiedAt        DateTime?
+  confirmedAt     DateTime?
+  outcome         String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  events          CareEvent[]
+
+  @@unique([orderId, milestone])
+  @@index([state, dueAt])
+  @@index([customerId, state])
+  @@map("careTask")
+}
+
+model CareEvent {
+  id          String @id @default(cuid())
+  customerId  String
+  customer    CareCustomer @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  taskId      String?
+  task        CareTask? @relation(fields: [taskId], references: [id], onDelete: Restrict)
+  actorId     String
+  kind        String
+  reason      String @default("")
+  createdAt   DateTime @default(now())
+
+  @@index([customerId, createdAt])
+  @@map("careEvent")
+}
+
+model CareSyncState {
+  id            String @id
+  watermark     DateTime?
+  lastSuccessAt DateTime?
+  lastAttemptAt DateTime?
+  lastError     String?
+  leaseUntil    DateTime?
+  leaseToken    String?
+  @@map("careSyncState")
+}
+
 generator client {
   provider               = "prisma-client"
   output                 = "../src/generated/prisma"

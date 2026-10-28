@@ -40,7 +40,7 @@ export function AppHeader({ user }: { user: User }) {
 
 	return (
 		<header className="flex h-12 shrink-0 items-center gap-2 border-b px-3 [view-transition-name:app-header]">
-			<div className="flex shrink-0 items-center gap-1">
+			<div className="flex min-w-0 items-center gap-1">
 				<Button
 					variant="ghost"
 					size="icon"

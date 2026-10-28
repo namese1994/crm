@@ -1,7 +1,8 @@
 import { API_KEY_HEADER } from "@crm/auth/api-keys";
 import { SESSION_COOKIE_NAME } from "@crm/auth/cookies";
 import { apiUrl } from "@crm/auth/env";
-import { ValidationPipe } from "@nestjs/common";
+import { CARE_INTEGRATIONS } from "@crm/validation/care-integrations";
+import { HttpStatus, ValidationPipe } from "@nestjs/common";
 import { NestFactory } from "@nestjs/core";
 import {
 	ExpressAdapter,
@@ -9,6 +10,7 @@ import {
 } from "@nestjs/platform-express";
 import { DocumentBuilder, SwaggerModule } from "@nestjs/swagger";
 import type { NextFunction, Request, Response } from "express";
+import { json } from "express";
 import helmet from "helmet";
 import { AppRouterHost } from "nestjs-trpc";
 import {
@@ -16,6 +18,7 @@ import {
 	generateOpenApiDocument,
 } from "trpc-to-openapi";
 import { AppModule } from "./app.module";
+import { careWebhookParserError } from "./customer-care/care-webhook.contract";
 import { ContextLogger } from "./logging/context-logger";
 import { REST_BRIDGE_PATH } from "./trpc/openapi";
 import { createBaseTrpcContext } from "./trpc/trpc.context";
@@ -28,6 +31,33 @@ export async function createApp(): Promise<NestExpressApplication> {
 	);
 
 	app.use(helmet());
+	app.use(
+		"/api/webhooks/care/poscake",
+		json({ limit: CARE_INTEGRATIONS.webhookBodyBytes }),
+	);
+	app.use(
+		"/api/webhooks/care/poscake",
+		(
+			error: Error,
+			_request: Request,
+			response: Response,
+			next: NextFunction,
+		) => {
+			const parsed = careWebhookParserError.safeParse(error);
+			if (!parsed.success) {
+				next(error);
+				return;
+			}
+			const large = parsed.data.type === "entity.too.large";
+			response
+				.status(large ? HttpStatus.PAYLOAD_TOO_LARGE : HttpStatus.BAD_REQUEST)
+				.json({
+					message: large
+						? "Webhook vượt giới hạn dung lượng"
+						: "JSON webhook không hợp lệ",
+				});
+		},
+	);
 	app.useGlobalPipes(
 		new ValidationPipe({
 			whitelist: true,

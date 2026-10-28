@@ -31,7 +31,7 @@ function Textarea({
 	return (
 		<textarea
 			data-slot="textarea"
-			className={cn(textareaVariants({ variant, size }), className)}
+			className={cn(textareaVariants({ variant, size }), "min-w-0", className)}
 			{...props}
 		/>
 	);

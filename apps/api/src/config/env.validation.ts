@@ -1,5 +1,6 @@
 import { plainToInstance, Type } from "class-transformer";
 import {
+	IsBooleanString,
 	IsEnum,
 	IsInt,
 	IsOptional,
@@ -19,6 +20,31 @@ export enum NodeEnv {
 }
 
 export class EnvironmentVariables {
+	@IsOptional()
+	@IsBooleanString()
+	CRM_CARE_MODE?: string;
+
+	@IsOptional()
+	@IsBooleanString()
+	CRM_CARE_PASSWORD_AUTH?: string;
+
+	@IsOptional()
+	@IsString()
+	@Matches(/^[A-Za-z0-9+/]{43}=$/)
+	CARE_CONFIG_ENCRYPTION_KEY?: string;
+
+	@IsOptional()
+	@IsString()
+	CARE_CHANNELS_JSON?: string;
+
+	@IsOptional()
+	@IsString()
+	CARE_POS_API_KEY?: string;
+
+	@IsOptional()
+	@IsString()
+	CARE_PANCAKE_TOKENS_JSON?: string;
+
 	@IsEnum(NodeEnv)
 	NODE_ENV: NodeEnv = NodeEnv.Development;
 

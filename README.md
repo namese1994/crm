@@ -74,6 +74,18 @@ because nobody can tell it is wrong.
   </tr>
 </table>
 
+## Manual customer care in this fork
+
+This fork adds a Vietnamese post-purchase care workspace at `/<workspace-slug>/care`. Set `CRM_CARE_MODE=true` to use it without the optional research and mailbox onboarding. Session authentication and manager permissions still apply.
+
+The care workflow uses verified delivery dates, approved templates, customer tags and staff assignments. Staff copy content and record outcomes manually. The application does not send customer messages. POSCake and Pancake source reads require separate runtime configuration and verification.
+
+Start with the [PM2 runbook](docs/customer-care/RUNBOOK.md), [acceptance backlog](docs/customer-care/BACKLOG.md), [business scenarios](docs/customer-care/SCENARIOS.md) and [validation evidence](docs/customer-care/VALIDATION.md). Live integration and staff pilot acceptance remain open.
+
+The [test walkthrough](docs/customer-care/TESTING.md) covers the deployed synthetic preview. Care mode also supports pre-provisioned password accounts with `CRM_CARE_PASSWORD_AUTH=true`; public signup remains disabled.
+
+Read the [source contracts](docs/customer-care/SOURCE-CONTRACTS.md) for integration boundaries and the [review report](docs/customer-care/REVIEW.md) for checked fixes. Use the [checkpoint](docs/customer-care/CHECKPOINT.md) to resume work.
+
 ## The agent
 
 [`apps/agent`](./apps/agent) is its own deployment, built on
@@ -379,6 +391,12 @@ redirect URIs. Set `CRON_SECRET` and point a scheduler at
 `apps/api/src/generated/server.ts` is committed and `build` must never regenerate it —
 the generator needs a newer GLIBC than most build images have. Regenerate locally and
 commit it with the router change that caused it.
+
+## Post-purchase customer care
+
+The fork adds manual customer care, POSCake/Pancake source settings, a durable webhook inbox and a read-only AI assistant. Start with [the PM2 runbook](docs/customer-care/RUNBOOK.md) and [the source/AI setup guide](docs/customer-care/SETTINGS-AND-WEBHOOK.md). See [validation and limits](docs/customer-care/VALIDATION.md) before connecting real data.
+
+The preferred checkout is `Y:\AI_Workspace\apps\crm`, also mounted at `/workspace/apps/crm`. Store secrets only in the root `.env`. Git includes source, migrations, generated tRPC contracts, tests and deployment configuration. Build outputs and private runtime files stay untracked.
 
 ## Contributing
 

@@ -1,0 +1,3859 @@
+import "reflect-metadata";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { db, type Prisma } from "@crm/db";
+import {
+	CARE,
+	type CareImport,
+	careDueAt,
+} from "@crm/validation/customer-care";
+import type { MiddlewareOptions } from "nestjs-trpc";
+import { CareMembershipMiddleware } from "../src/customer-care/care-membership.middleware";
+import { CustomerCareService } from "../src/customer-care/customer-care.service";
+
+type CustomerConfig = Parameters<CustomerCareService["configureCustomer"]>[0];
+class TestCustomerCareService extends CustomerCareService {
+	override async configureCustomer(
+		input: Omit<CustomerConfig, "expected"> & {
+			expected?: CustomerConfig["expected"];
+		},
+		actorId: string,
+	) {
+		const expected =
+			input.expected ??
+			(await db.careCustomer.findUniqueOrThrow({
+				where: { id: input.id },
+				select: { enrolled: true, ownerId: true, tags: true },
+			}));
+		return super.configureCustomer({ ...input, expected }, actorId);
+	}
+}
+const service = new TestCustomerCareService(db);
+const prefix = `care-${crypto.randomUUID()}`;
+const actor = `${prefix}-staff`;
+const manager = `${prefix}-manager`;
+const now = new Date("2026-10-27T03:00:00Z");
+const fresh = now.toISOString();
+async function waitForDatabaseLock(pid: number, blockerPid: number) {
+	const deadline = Date.now() + 2500;
+	while (Date.now() < deadline) {
+		const rows = await db.$queryRaw<
+			{ blocked: boolean }[]
+		>`SELECT ${blockerPid} = ANY(pg_blocking_pids(${pid})) AS blocked`;
+		if (rows[0]?.blocked) return;
+		await new Promise((resolve) => setTimeout(resolve, 25));
+	}
+	throw new Error("Expected database lock wait was not observed");
+}
+const fixture = (
+	key: string,
+	brand: "UMEHA" | "LI_EN_SPORT" = "UMEHA",
+): CareImport & { conversation: NonNullable<CareImport["conversation"]> } => ({
+	brand,
+	shopId: "test-shop",
+	customerId: `${prefix}-${key}`,
+	customerName: "Khách kiểm thử",
+	orderId: `${prefix}-${key}`,
+	orderStatus: "DELIVERED",
+	deliveredAt: "2026-10-26T04:00:00Z",
+	deliveryEvidence: "synthetic delivery event",
+	products: [{ sku: " V35  M ", name: "Sản phẩm kiểm thử", quantity: 1 }],
+	sourceCreatedAt: "2026-10-20T04:00:00Z",
+	sourceUpdatedAt: fresh,
+	conversation: {
+		pageId: `${prefix}-${brand}`,
+		conversationId: `${prefix}-${key}-${brand}`,
+		lastInboundAt: null,
+		lastOutboundAt: null,
+		verifiedAt: fresh,
+		activityVerifiedAt: fresh,
+		canSend: true,
+	},
+});
+
+test("future conversation activity cannot manufacture a fresh source check", async () => {
+	const input = fixture("future-activity");
+	input.conversation.activityVerifiedAt = "2026-10-28T03:00:00Z";
+	await expect(service.importOrder(input, manager, now)).rejects.toThrow(
+		"Dữ liệu nguồn có thời điểm trong tương lai",
+	);
+});
+
+test("stale customer configuration cannot overwrite another manager's changes", async () => {
+	const imported = await service.importOrder(
+		fixture("stale-config"),
+		manager,
+		now,
+	);
+	const expected = await db.careCustomer.findUniqueOrThrow({
+		where: { id: imported.customerId },
+		select: { enrolled: true, ownerId: true, tags: true },
+	});
+	await service.configureCustomer(
+		{
+			id: imported.customerId,
+			enrolled: true,
+			ownerId: actor,
+			tags: ["new-tag"],
+			expected,
+		},
+		manager,
+	);
+	const eventsBefore = await db.careEvent.count({
+		where: { customerId: imported.customerId },
+	});
+	for (const enrolled of [false, true]) {
+		await expect(
+			service.configureCustomer(
+				{
+					id: imported.customerId,
+					enrolled,
+					ownerId: null,
+					tags: ["old-draft"],
+					expected,
+				},
+				manager,
+			),
+		).rejects.toThrow("đã thay đổi");
+	}
+	const after = await db.careCustomer.findUniqueOrThrow({
+		where: { id: imported.customerId },
+		select: { enrolled: true, ownerId: true, tags: true },
+	});
+	expect(after).toEqual({ enrolled: true, ownerId: actor, tags: ["new-tag"] });
+	expect(
+		await db.careEvent.count({ where: { customerId: imported.customerId } }),
+	).toBe(eventsBefore);
+});
+
+test("concurrent customer configuration changes from one snapshot have one winner", async () => {
+	const imported = await service.importOrder(
+		fixture("concurrent-config"),
+		manager,
+		now,
+	);
+	const expected = await db.careCustomer.findUniqueOrThrow({
+		where: { id: imported.customerId },
+		select: { enrolled: true, ownerId: true, tags: true },
+	});
+	const updates = await Promise.allSettled(
+		["first", "second"].map((tag) =>
+			service.configureCustomer(
+				{
+					id: imported.customerId,
+					enrolled: false,
+					ownerId: actor,
+					tags: [tag],
+					expected,
+				},
+				manager,
+			),
+		),
+	);
+	expect(
+		updates.filter((result) => result.status === "fulfilled"),
+	).toHaveLength(1);
+	const rejected = updates.filter((result) => result.status === "rejected");
+	expect(rejected).toHaveLength(1);
+	expect(rejected[0]?.reason).toMatchObject({ status: 409 });
+	const after = await db.careCustomer.findUniqueOrThrow({
+		where: { id: imported.customerId },
+		select: { tags: true },
+	});
+	expect(after.tags).toHaveLength(1);
+	expect(["first", "second"]).toContain(after.tags[0] ?? "");
+	expect(
+		await db.careEvent.count({
+			where: { customerId: imported.customerId, kind: "CUSTOMER_CONFIGURED" },
+		}),
+	).toBe(1);
+});
+
+async function enrolled(key: string) {
+	const imported = await service.importOrder(fixture(key), manager, now);
+	await service.configureCustomer(
+		{ id: imported.customerId, enrolled: true, ownerId: actor, tags: [] },
+		manager,
+	);
+	await service.tick(now);
+	return db.careTask.findFirstOrThrow({
+		where: { customerId: imported.customerId },
+	});
+}
+
+test("an enrolled customer without an assignee gets no new task until assigned", async () => {
+	const imported = await service.importOrder(
+		fixture("unassigned"),
+		manager,
+		now,
+	);
+	await service.configureCustomer(
+		{ id: imported.customerId, enrolled: true, ownerId: null, tags: [] },
+		manager,
+	);
+	await service.tick(now);
+	expect(
+		await db.careTask.count({ where: { customerId: imported.customerId } }),
+	).toBe(0);
+	await service.configureCustomer(
+		{ id: imported.customerId, enrolled: true, ownerId: actor, tags: [] },
+		manager,
+	);
+	await service.tick(now);
+	expect(
+		await db.careTask.count({ where: { customerId: imported.customerId } }),
+	).toBe(1);
+});
+
+test("a removed assignee gets no new task until a current member is assigned", async () => {
+	const formerUser = `${prefix}-former-assignee`;
+	await db.user.create({
+		data: {
+			id: formerUser,
+			name: "Former test member",
+			email: `${formerUser}@example.invalid`,
+			updatedAt: now,
+		},
+	});
+	try {
+		await db.member.create({
+			data: {
+				id: crypto.randomUUID(),
+				organizationId: "workspace",
+				userId: formerUser,
+				role: "member",
+				createdAt: now,
+			},
+		});
+		const imported = await service.importOrder(
+			fixture("former-assignee"),
+			manager,
+			now,
+		);
+		await service.configureCustomer(
+			{
+				id: imported.customerId,
+				enrolled: true,
+				ownerId: formerUser,
+				tags: [],
+			},
+			manager,
+		);
+		await db.member.delete({
+			where: {
+				organizationId_userId: {
+					organizationId: "workspace",
+					userId: formerUser,
+				},
+			},
+		});
+		const beforeReassignment = await service.customers({
+			search: `${prefix}-former-assignee`,
+			page: 1,
+		});
+		expect(
+			beforeReassignment.rows.find(
+				(customer) => customer.id === imported.customerId,
+			)?.ownerValid,
+		).toBe(false);
+		await service.tick(now);
+		expect(
+			await db.careTask.count({ where: { customerId: imported.customerId } }),
+		).toBe(0);
+		await service.configureCustomer(
+			{ id: imported.customerId, enrolled: true, ownerId: actor, tags: [] },
+			manager,
+		);
+		await service.tick(now);
+		expect(
+			await db.careTask.count({ where: { customerId: imported.customerId } }),
+		).toBe(1);
+		const afterReassignment = await service.customers({
+			search: `${prefix}-former-assignee`,
+			page: 1,
+		});
+		expect(
+			afterReassignment.rows.find(
+				(customer) => customer.id === imported.customerId,
+			)?.ownerValid,
+		).toBe(true);
+		await db.member.create({
+			data: {
+				id: crypto.randomUUID(),
+				organizationId: "workspace",
+				userId: formerUser,
+				role: "member",
+				createdAt: now,
+			},
+		});
+		await service.configureCustomer(
+			{
+				id: imported.customerId,
+				enrolled: true,
+				ownerId: formerUser,
+				tags: [],
+			},
+			manager,
+		);
+		const task = await db.careTask.findFirstOrThrow({
+			where: { customerId: imported.customerId },
+		});
+		await db.careTask.update({
+			where: { id: task.id },
+			data: { state: "WAITING", outcome: "PROMISED", dueAt: now },
+		});
+		await db.member.delete({
+			where: {
+				organizationId_userId: {
+					organizationId: "workspace",
+					userId: formerUser,
+				},
+			},
+		});
+		await service.tick(now);
+		expect(
+			(await db.careTask.findUniqueOrThrow({ where: { id: task.id } })).state,
+		).toBe("WAITING");
+		await service.configureCustomer(
+			{ id: imported.customerId, enrolled: true, ownerId: actor, tags: [] },
+			manager,
+		);
+		await service.tick(now);
+		expect(
+			(await db.careTask.findUniqueOrThrow({ where: { id: task.id } })).state,
+		).toBe("OPEN");
+		await db.member.create({
+			data: {
+				id: crypto.randomUUID(),
+				organizationId: "workspace",
+				userId: formerUser,
+				role: "member",
+				createdAt: now,
+			},
+		});
+		await service.configureCustomer(
+			{
+				id: imported.customerId,
+				enrolled: true,
+				ownerId: formerUser,
+				tags: [],
+			},
+			manager,
+		);
+		await db.careTask.update({
+			where: { id: task.id },
+			data: { state: "COPIED", outcome: null },
+		});
+		await db.member.delete({
+			where: {
+				organizationId_userId: {
+					organizationId: "workspace",
+					userId: formerUser,
+				},
+			},
+		});
+		await service.tick(now);
+		expect(
+			(await db.careTask.findUniqueOrThrow({ where: { id: task.id } })).state,
+		).toBe("COPIED");
+		await service.configureCustomer(
+			{ id: imported.customerId, enrolled: true, ownerId: actor, tags: [] },
+			manager,
+		);
+		const copiedAfterHandoff = await db.careTask.findUniqueOrThrow({
+			where: { id: task.id },
+		});
+		expect(copiedAfterHandoff.state).toBe("WAITING");
+		expect(copiedAfterHandoff.outcome).toBe("UNCERTAIN");
+		expect(
+			(
+				await db.careCustomer.findUniqueOrThrow({
+					where: { id: imported.customerId },
+				})
+			).uncertain,
+		).toBe(true);
+	} finally {
+		await db.member.deleteMany({
+			where: { organizationId: "workspace", userId: formerUser },
+		});
+		await db.user.delete({ where: { id: formerUser } });
+	}
+});
+
+test("a claim waiting for a committed membership deletion is rejected", async () => {
+	const userId = `${prefix}-concurrent-revoke`;
+	await db.user.create({
+		data: {
+			id: userId,
+			name: "Test",
+			email: `${userId}@example.invalid`,
+			updatedAt: now,
+		},
+	});
+	let releaseDeletion = () => {};
+	let signalDeleted = () => {};
+	let signalClaimPid = (_pid: number) => {};
+	let signalDeletePid = (_pid: number) => {};
+	const release = new Promise<void>((resolve) => {
+		releaseDeletion = resolve;
+	});
+	const deleted = new Promise<void>((resolve) => {
+		signalDeleted = resolve;
+	});
+	const claimPid = new Promise<number>((resolve) => {
+		signalClaimPid = resolve;
+	});
+	const deletePid = new Promise<number>((resolve) => {
+		signalDeletePid = resolve;
+	});
+	let deleteTransaction: Promise<unknown> | undefined;
+	let claim: Promise<{ allowed: boolean; error?: unknown }> | undefined;
+	try {
+		await db.member.create({
+			data: {
+				id: crypto.randomUUID(),
+				organizationId: "workspace",
+				userId,
+				role: "member",
+				createdAt: now,
+			},
+		});
+		const imported = await service.importOrder(
+			fixture("concurrent-revoke"),
+			manager,
+			now,
+		);
+		await service.configureCustomer(
+			{ id: imported.customerId, enrolled: true, ownerId: userId, tags: [] },
+			manager,
+		);
+		await service.tick(now);
+		const task = await db.careTask.findFirstOrThrow({
+			where: { customerId: imported.customerId },
+		});
+		deleteTransaction = db.$transaction(
+			async (tx) => {
+				const rows = await tx.$queryRaw<
+					{ pid: number }[]
+				>`SELECT pg_backend_pid() AS pid`;
+				if (!rows[0]) throw new Error("Missing delete backend PID");
+				signalDeletePid(rows[0].pid);
+				await tx.member.delete({
+					where: {
+						organizationId_userId: { organizationId: "workspace", userId },
+					},
+				});
+				signalDeleted();
+				await release;
+			},
+			{ timeout: 5000 },
+		);
+		await Promise.race([
+			deleted,
+			deleteTransaction.then(() => {
+				throw new Error("Deletion ended before barrier");
+			}),
+		]);
+		const isolated = new CustomerCareService(db);
+		const original = (
+			Reflect.get(isolated, "lockMembership") as (
+				tx: Prisma.TransactionClient,
+				id: string,
+			) => Promise<boolean>
+		).bind(isolated);
+		Reflect.set(
+			isolated,
+			"lockMembership",
+			async (tx: Prisma.TransactionClient, id: string) => {
+				const rows = await tx.$queryRaw<
+					{ pid: number }[]
+				>`SELECT pg_backend_pid() AS pid`;
+				if (!rows[0]) throw new Error("Missing claim backend PID");
+				signalClaimPid(rows[0].pid);
+				return original(tx, id);
+			},
+		);
+		claim = isolated.claim(task.id, userId, now).then(
+			() => ({ allowed: true }),
+			(error: unknown) => ({ allowed: false, error }),
+		);
+		const pid = await Promise.race([
+			claimPid,
+			claim.then(() => {
+				throw new Error("Claim ended before lock query");
+			}),
+		]);
+		await waitForDatabaseLock(pid, await deletePid);
+		releaseDeletion();
+		await deleteTransaction;
+		const outcome = await claim;
+		expect(outcome.allowed).toBe(false);
+		expect(outcome.error).toMatchObject({
+			status: 403,
+			message: "Nhân viên không còn trong workspace",
+		});
+		expect(
+			await db.careEvent.count({ where: { taskId: task.id, kind: "CLAIMED" } }),
+		).toBe(0);
+	} finally {
+		releaseDeletion();
+		if (deleteTransaction) await deleteTransaction.catch(() => {});
+		if (claim) await claim.catch(() => {});
+		await db.member.deleteMany({
+			where: { organizationId: "workspace", userId },
+		});
+		await db.user.delete({ where: { id: userId } });
+	}
+});
+
+test("membership deletion waits for an already authorized claim to commit", async () => {
+	const userId = `${prefix}-concurrent-claim`;
+	await db.user.create({
+		data: {
+			id: userId,
+			name: "Test",
+			email: `${userId}@example.invalid`,
+			updatedAt: now,
+		},
+	});
+	let releaseClaim = () => {};
+	let signalLocked = (_pid: number) => {};
+	let signalDeletePid = (_pid: number) => {};
+	const release = new Promise<void>((resolve) => {
+		releaseClaim = resolve;
+	});
+	const locked = new Promise<number>((resolve) => {
+		signalLocked = resolve;
+	});
+	const deletePid = new Promise<number>((resolve) => {
+		signalDeletePid = resolve;
+	});
+	let deletion: Promise<unknown> | undefined;
+	let claim: ReturnType<CustomerCareService["claim"]> | undefined;
+	try {
+		await db.member.create({
+			data: {
+				id: crypto.randomUUID(),
+				organizationId: "workspace",
+				userId,
+				role: "member",
+				createdAt: now,
+			},
+		});
+		const imported = await service.importOrder(
+			fixture("concurrent-claim"),
+			manager,
+			now,
+		);
+		await service.configureCustomer(
+			{ id: imported.customerId, enrolled: true, ownerId: userId, tags: [] },
+			manager,
+		);
+		await service.tick(now);
+		const task = await db.careTask.findFirstOrThrow({
+			where: { customerId: imported.customerId },
+		});
+		const isolated = new CustomerCareService(db);
+		const original = (
+			Reflect.get(isolated, "lockMembership") as (
+				tx: unknown,
+				id: string,
+			) => Promise<boolean>
+		).bind(isolated);
+		Reflect.set(isolated, "lockMembership", async (tx: unknown, id: string) => {
+			const result = await original(tx, id);
+			if (id === userId) {
+				const rows = await (tx as Prisma.TransactionClient).$queryRaw<
+					{ pid: number }[]
+				>`SELECT pg_backend_pid() AS pid`;
+				if (!rows[0]) throw new Error("Missing claim backend PID");
+				signalLocked(rows[0].pid);
+				await release;
+			}
+			return result;
+		});
+		claim = isolated.claim(task.id, userId, now);
+		const blockerPid = await Promise.race([
+			locked,
+			claim.then(() => {
+				throw new Error("Claim ended before barrier");
+			}),
+		]);
+		deletion = db.$transaction(
+			async (tx) => {
+				const rows = await tx.$queryRaw<
+					{ pid: number }[]
+				>`SELECT pg_backend_pid() AS pid`;
+				if (!rows[0]) throw new Error("Missing delete backend PID");
+				signalDeletePid(rows[0].pid);
+				await tx.member.delete({
+					where: {
+						organizationId_userId: { organizationId: "workspace", userId },
+					},
+				});
+			},
+			{ timeout: 5000 },
+		);
+		const pid = await Promise.race([
+			deletePid,
+			deletion.then(() => {
+				throw new Error("Deletion ended before lock query");
+			}),
+		]);
+		await waitForDatabaseLock(pid, blockerPid);
+		releaseClaim();
+		expect((await claim).state).toBe("CLAIMED");
+		await deletion;
+		expect(
+			await db.careEvent.count({ where: { taskId: task.id, kind: "CLAIMED" } }),
+		).toBe(1);
+	} finally {
+		releaseClaim();
+		if (claim) await claim.catch(() => {});
+		if (deletion) await deletion.catch(() => {});
+		await db.member.deleteMany({
+			where: { organizationId: "workspace", userId },
+		});
+		await db.user.delete({ where: { id: userId } });
+	}
+});
+
+test("customer search and filters cover the whole result set with stable pagination", async () => {
+	const marker = `${prefix}-lookup`;
+	await db.careCustomer.createMany({
+		data: Array.from({ length: 35 }, (_, index) => ({
+			brand: index < 20 ? ("UMEHA" as const) : ("LI_EN_SPORT" as const),
+			shopId: "test-shop",
+			sourceCustomerId: `${marker}-${index}`,
+			name: `Khách ${marker}`,
+			enrolled: index % 2 === 0,
+			syncedAt: now,
+		})),
+	});
+	const first = await service.customers({ search: marker, page: 1 });
+	const second = await service.customers({ search: marker, page: 2 });
+	expect(first.total).toBe(35);
+	expect(first.rows).toHaveLength(first.pageSize);
+	expect(second.rows).toHaveLength(35 - first.pageSize);
+	expect(
+		new Set([...first.rows, ...second.rows].map((row) => row.id)).size,
+	).toBe(35);
+	const filtered = await service.customers({
+		search: marker.toUpperCase(),
+		brand: "UMEHA",
+		enrolled: true,
+		page: 1,
+	});
+	expect(filtered.total).toBe(10);
+	expect(
+		filtered.rows.every((row) => row.brand === "UMEHA" && row.enrolled),
+	).toBe(true);
+	const byId = await service.customers({ search: `${marker}-34`, page: 1 });
+	expect(byId.total).toBe(1);
+	await db.careCustomer.createMany({
+		data: ["%", "_", "X"].map((suffix) => ({
+			brand: "UMEHA" as const,
+			shopId: "test-shop",
+			sourceCustomerId: `${marker}-literal-${suffix}`,
+			name: `Khách ${marker}${suffix}`,
+			syncedAt: now,
+		})),
+	});
+	expect(
+		(await service.customers({ search: `${marker}%`, page: 1 })).total,
+	).toBe(1);
+	expect(
+		(await service.customers({ search: `${marker}_`, page: 1 })).total,
+	).toBe(1);
+});
+
+test("care membership guard denies a valid session without workspace membership", async () => {
+	const guard = new CareMembershipMiddleware(db);
+	let invoked = false;
+	const options = (userId: string) =>
+		({
+			ctx: { session: { user: { id: userId } } },
+			next: async () => {
+				invoked = true;
+				return { ok: true };
+			},
+		}) as unknown as MiddlewareOptions;
+	await guard.use(options(actor));
+	expect(invoked).toBe(true);
+	invoked = false;
+	await expect(
+		guard.use(options(`${prefix}-not-member`)),
+	).rejects.toMatchObject({ code: "FORBIDDEN" });
+	expect(invoked).toBe(false);
+	await expect(
+		guard.use({ ctx: { session: null } } as unknown as MiddlewareOptions),
+	).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+});
+
+test("customer resolution rejects an owner removed from the workspace", async () => {
+	const imported = await service.importOrder(
+		fixture("resolve-removed-owner"),
+		manager,
+		now,
+	);
+	await service.configureCustomer(
+		{ id: imported.customerId, enrolled: false, ownerId: actor, tags: [] },
+		manager,
+	);
+	const membership = await db.member.findUniqueOrThrow({
+		where: {
+			organizationId_userId: { organizationId: "workspace", userId: actor },
+		},
+	});
+	try {
+		await db.member.delete({ where: { id: membership.id } });
+		const before = await db.careEvent.count({
+			where: { customerId: imported.customerId },
+		});
+		await expect(
+			service.resolveCustomer(
+				imported.customerId,
+				actor,
+				"Synthetic resolution",
+				null,
+			),
+		).rejects.toThrow("Nhân viên không còn trong workspace");
+		expect(
+			await db.careEvent.count({ where: { customerId: imported.customerId } }),
+		).toBe(before);
+	} finally {
+		await db.member.upsert({
+			where: { id: membership.id },
+			create: membership,
+			update: {},
+		});
+	}
+});
+
+test("customer assignment rejects a manager demoted to member", async () => {
+	const imported = await service.importOrder(
+		fixture("assignment-demoted-manager"),
+		manager,
+		now,
+	);
+	const membership = await db.member.findUniqueOrThrow({
+		where: {
+			organizationId_userId: { organizationId: "workspace", userId: manager },
+		},
+	});
+	try {
+		await db.member.update({
+			where: { id: membership.id },
+			data: { role: "member" },
+		});
+		const before = await db.careEvent.count({
+			where: { customerId: imported.customerId },
+		});
+		await expect(
+			service.configureCustomer(
+				{ id: imported.customerId, enrolled: false, ownerId: actor, tags: [] },
+				manager,
+			),
+		).rejects.toThrow("Chỉ quản lý được cấu hình chăm sóc");
+		expect(
+			(
+				await db.careCustomer.findUniqueOrThrow({
+					where: { id: imported.customerId },
+				})
+			).ownerId,
+		).toBeNull();
+		expect(
+			await db.careEvent.count({ where: { customerId: imported.customerId } }),
+		).toBe(before);
+	} finally {
+		await db.member.update({
+			where: { id: membership.id },
+			data: { role: membership.role },
+		});
+	}
+});
+
+test("a stale editor cannot overwrite a newer approved template", async () => {
+	const input = {
+		brand: "UMEHA" as const,
+		purpose: "CHECK_IN" as const,
+		name: `${prefix}-stale-editor`,
+		body: "Bản đầu {{customer}}",
+		requiredTags: ["stale-editor-only"],
+		excludedTags: [],
+		validUntil: null,
+	};
+	const original = await service.saveTemplate(input, manager);
+	const edited = await service.saveTemplate(
+		{
+			...input,
+			id: original.id,
+			version: original.version,
+			body: "Bản mới {{customer}}",
+		},
+		manager,
+	);
+	const approved = await service.approveTemplate(
+		edited.id,
+		manager,
+		true,
+		edited.version,
+	);
+	await expect(
+		service.saveTemplate(
+			{
+				...input,
+				id: original.id,
+				version: original.version,
+				body: "Bản cũ {{customer}}",
+			},
+			manager,
+		),
+	).rejects.toThrow("Mẫu đã thay đổi");
+	await expect(
+		service.saveTemplate({ ...input, id: original.id }, manager),
+	).rejects.toThrow("Cần phiên bản mẫu");
+	const after = await db.careTemplate.findUniqueOrThrow({
+		where: { id: original.id },
+	});
+	expect(after.body).toBe(approved.body);
+	expect(after.version).toBe(approved.version);
+	expect(after.approvedAt).not.toBeNull();
+	expect(after.approvedBy).toBe(manager);
+});
+
+test("concurrent template edits from the same version have one winner", async () => {
+	const input = {
+		brand: "UMEHA" as const,
+		purpose: "CHECK_IN" as const,
+		name: `${prefix}-concurrent-edit`,
+		body: "Bản đầu {{customer}}",
+		requiredTags: ["concurrent-editor-only"],
+		excludedTags: [],
+		validUntil: null,
+	};
+	const original = await service.saveTemplate(input, manager);
+	const results = await Promise.allSettled(
+		["A {{customer}}", "B {{customer}}"].map((body) =>
+			service.saveTemplate(
+				{ ...input, id: original.id, version: original.version, body },
+				manager,
+			),
+		),
+	);
+	const fulfilled = results.filter((result) => result.status === "fulfilled");
+	const rejected = results.filter((result) => result.status === "rejected");
+	expect(fulfilled).toHaveLength(1);
+	expect(rejected).toHaveLength(1);
+	const after = await db.careTemplate.findUniqueOrThrow({
+		where: { id: original.id },
+	});
+	expect(after.version).toBe(original.version + 1);
+	expect(
+		fulfilled[0]?.status === "fulfilled" &&
+			after.body === fulfilled[0].value.body,
+	).toBe(true);
+});
+
+test("a demoted manager cannot edit or approve a template", async () => {
+	const input = {
+		brand: "UMEHA" as const,
+		purpose: "CHECK_IN" as const,
+		name: `${prefix}-role-template`,
+		body: "Chào {{customer}}",
+		requiredTags: [],
+		excludedTags: [],
+		validUntil: null,
+	};
+	const template = await service.saveTemplate(input, manager);
+	const membership = await db.member.findUniqueOrThrow({
+		where: {
+			organizationId_userId: { organizationId: "workspace", userId: manager },
+		},
+	});
+	try {
+		await db.member.update({
+			where: { id: membership.id },
+			data: { role: "member" },
+		});
+		await expect(
+			service.saveTemplate(
+				{ ...input, id: template.id, body: "Changed" },
+				manager,
+			),
+		).rejects.toThrow("Chỉ quản lý được cấu hình chăm sóc");
+		await expect(
+			service.approveTemplate(template.id, manager, true, template.version),
+		).rejects.toThrow("Chỉ quản lý được cấu hình chăm sóc");
+		const after = await db.careTemplate.findUniqueOrThrow({
+			where: { id: template.id },
+		});
+		expect(after.body).toBe(template.body);
+		expect(after.version).toBe(template.version);
+		expect(after.approvedAt).toBeNull();
+	} finally {
+		await db.member.update({
+			where: { id: membership.id },
+			data: { role: membership.role },
+		});
+	}
+});
+
+test("template approval waiting for manager demotion is denied", async () => {
+	const template = await service.saveTemplate(
+		{
+			brand: "UMEHA",
+			purpose: "CHECK_IN",
+			name: `${prefix}-concurrent-template`,
+			body: "Chào {{customer}}",
+			requiredTags: [],
+			excludedTags: [],
+			validUntil: null,
+		},
+		manager,
+	);
+	const member = await db.member.findUniqueOrThrow({
+		where: {
+			organizationId_userId: { organizationId: "workspace", userId: manager },
+		},
+	});
+	let releaseDemotion = () => {};
+	let signalDemotion = (_pid: number) => {};
+	let signalApproval = (_pid: number) => {};
+	const release = new Promise<void>((resolve) => {
+		releaseDemotion = resolve;
+	});
+	const demotionPid = new Promise<number>((resolve) => {
+		signalDemotion = resolve;
+	});
+	const approvalPid = new Promise<number>((resolve) => {
+		signalApproval = resolve;
+	});
+	let demotion: Promise<unknown> | undefined;
+	let approval: Promise<{ allowed: boolean; error?: unknown }> | undefined;
+	try {
+		demotion = db.$transaction(
+			async (tx) => {
+				const rows = await tx.$queryRaw<
+					{ pid: number }[]
+				>`SELECT pg_backend_pid() AS pid`;
+				if (!rows[0]) throw new Error("Missing demotion backend PID");
+				await tx.member.update({
+					where: { id: member.id },
+					data: { role: "member" },
+				});
+				signalDemotion(rows[0].pid);
+				await release;
+			},
+			{ timeout: 5000 },
+		);
+		const blockerPid = await Promise.race([
+			demotionPid,
+			demotion.then(() => {
+				throw new Error("Demotion ended before barrier");
+			}),
+		]);
+		const isolated = new CustomerCareService(db);
+		const original = (
+			Reflect.get(isolated, "lockMembershipRole") as (
+				tx: Prisma.TransactionClient,
+				id: string,
+			) => Promise<unknown>
+		).bind(isolated);
+		Reflect.set(
+			isolated,
+			"lockMembershipRole",
+			async (tx: Prisma.TransactionClient, id: string) => {
+				const rows = await tx.$queryRaw<
+					{ pid: number }[]
+				>`SELECT pg_backend_pid() AS pid`;
+				if (!rows[0]) throw new Error("Missing approval backend PID");
+				signalApproval(rows[0].pid);
+				return original(tx, id);
+			},
+		);
+		approval = isolated
+			.approveTemplate(template.id, manager, true, template.version)
+			.then(
+				() => ({ allowed: true }),
+				(error: unknown) => ({ allowed: false, error }),
+			);
+		const waiterPid = await Promise.race([
+			approvalPid,
+			approval.then(() => {
+				throw new Error("Approval ended before barrier");
+			}),
+		]);
+		await waitForDatabaseLock(waiterPid, blockerPid);
+		releaseDemotion();
+		await demotion;
+		const result = await approval;
+		expect(result.allowed).toBe(false);
+		expect(result.error).toMatchObject({
+			status: 403,
+			message: "Chỉ quản lý được cấu hình chăm sóc",
+		});
+		const after = await db.careTemplate.findUniqueOrThrow({
+			where: { id: template.id },
+		});
+		expect(after.version).toBe(template.version);
+		expect(after.approvedAt).toBeNull();
+	} finally {
+		releaseDemotion();
+		if (demotion) await demotion.catch(() => {});
+		if (approval) await approval.catch(() => {});
+		await db.member.update({
+			where: { id: member.id },
+			data: { role: member.role },
+		});
+	}
+});
+
+test("manager demotion waits for an authorized template approval", async () => {
+	const template = await service.saveTemplate(
+		{
+			brand: "UMEHA",
+			purpose: "CHECK_IN",
+			name: `${prefix}-concurrent-approved`,
+			body: "Chào {{customer}}",
+			requiredTags: ["approval-isolated"],
+			excludedTags: [],
+			validUntil: null,
+		},
+		manager,
+	);
+	const member = await db.member.findUniqueOrThrow({
+		where: {
+			organizationId_userId: { organizationId: "workspace", userId: manager },
+		},
+	});
+	let releaseApproval = () => {};
+	let signalApproval = (_pid: number) => {};
+	let signalDemotion = (_pid: number) => {};
+	const release = new Promise<void>((resolve) => {
+		releaseApproval = resolve;
+	});
+	const approvalPid = new Promise<number>((resolve) => {
+		signalApproval = resolve;
+	});
+	const demotionPid = new Promise<number>((resolve) => {
+		signalDemotion = resolve;
+	});
+	let approval: ReturnType<CustomerCareService["approveTemplate"]> | undefined;
+	let demotion: Promise<unknown> | undefined;
+	try {
+		const isolated = new CustomerCareService(db);
+		const original = (
+			Reflect.get(isolated, "lockMembershipRole") as (
+				tx: Prisma.TransactionClient,
+				id: string,
+			) => Promise<unknown>
+		).bind(isolated);
+		Reflect.set(
+			isolated,
+			"lockMembershipRole",
+			async (tx: Prisma.TransactionClient, id: string) => {
+				const result = await original(tx, id);
+				if (id === manager) {
+					const rows = await tx.$queryRaw<
+						{ pid: number }[]
+					>`SELECT pg_backend_pid() AS pid`;
+					if (!rows[0]) throw new Error("Missing approval backend PID");
+					signalApproval(rows[0].pid);
+					await release;
+				}
+				return result;
+			},
+		);
+		approval = isolated.approveTemplate(
+			template.id,
+			manager,
+			true,
+			template.version,
+		);
+		const blockerPid = await Promise.race([
+			approvalPid,
+			approval.then(() => {
+				throw new Error("Approval ended before barrier");
+			}),
+		]);
+		demotion = db.$transaction(
+			async (tx) => {
+				const rows = await tx.$queryRaw<
+					{ pid: number }[]
+				>`SELECT pg_backend_pid() AS pid`;
+				if (!rows[0]) throw new Error("Missing demotion backend PID");
+				signalDemotion(rows[0].pid);
+				await tx.member.update({
+					where: { id: member.id },
+					data: { role: "member" },
+				});
+			},
+			{ timeout: 5000 },
+		);
+		const waiterPid = await Promise.race([
+			demotionPid,
+			demotion.then(() => {
+				throw new Error("Demotion ended before barrier");
+			}),
+		]);
+		await waitForDatabaseLock(waiterPid, blockerPid);
+		releaseApproval();
+		const approved = await approval;
+		expect(approved.approvedAt).not.toBeNull();
+		expect(approved.version).toBe(template.version + 1);
+		await demotion;
+		await expect(
+			service.approveTemplate(template.id, manager, false, approved.version),
+		).rejects.toThrow("Chỉ quản lý được cấu hình chăm sóc");
+	} finally {
+		releaseApproval();
+		if (approval) await approval.catch(() => {});
+		if (demotion) await demotion.catch(() => {});
+		await db.member.update({
+			where: { id: member.id },
+			data: { role: member.role },
+		});
+	}
+});
+
+test("a manager can assign themselves, clear assignment, and cannot assign a missing member", async () => {
+	const imported = await service.importOrder(
+		fixture("assignment-owner-edges"),
+		manager,
+		now,
+	);
+	await service.configureCustomer(
+		{ id: imported.customerId, enrolled: false, ownerId: manager, tags: [] },
+		manager,
+	);
+	expect(
+		(
+			await db.careCustomer.findUniqueOrThrow({
+				where: { id: imported.customerId },
+			})
+		).ownerId,
+	).toBe(manager);
+	await service.configureCustomer(
+		{ id: imported.customerId, enrolled: false, ownerId: null, tags: [] },
+		manager,
+	);
+	const events = await db.careEvent.count({
+		where: { customerId: imported.customerId },
+	});
+	await expect(
+		service.configureCustomer(
+			{
+				id: imported.customerId,
+				enrolled: false,
+				ownerId: `${prefix}-missing`,
+				tags: [],
+			},
+			manager,
+		),
+	).rejects.toThrow("Nhân viên không thuộc workspace");
+	expect(
+		(
+			await db.careCustomer.findUniqueOrThrow({
+				where: { id: imported.customerId },
+			})
+		).ownerId,
+	).toBeNull();
+	expect(
+		await db.careEvent.count({ where: { customerId: imported.customerId } }),
+	).toBe(events);
+});
+
+test("assignment waiting for owner removal fails without changing customer", async () => {
+	const imported = await service.importOrder(
+		fixture("assignment-owner-removal"),
+		manager,
+		now,
+	);
+	const member = await db.member.findUniqueOrThrow({
+		where: {
+			organizationId_userId: { organizationId: "workspace", userId: actor },
+		},
+	});
+	const before = await db.careEvent.count({
+		where: { customerId: imported.customerId },
+	});
+	let releaseDeletion = () => {};
+	let signalDeletion = (_pid: number) => {};
+	let signalAssignment = (_pid: number) => {};
+	const release = new Promise<void>((resolve) => {
+		releaseDeletion = resolve;
+	});
+	const deletionPid = new Promise<number>((resolve) => {
+		signalDeletion = resolve;
+	});
+	const assignmentPid = new Promise<number>((resolve) => {
+		signalAssignment = resolve;
+	});
+	let deletion: Promise<unknown> | undefined;
+	let assignment: Promise<{ allowed: boolean; error?: unknown }> | undefined;
+	try {
+		deletion = db.$transaction(
+			async (tx) => {
+				const rows = await tx.$queryRaw<
+					{ pid: number }[]
+				>`SELECT pg_backend_pid() AS pid`;
+				if (!rows[0]) throw new Error("Missing deletion backend PID");
+				await tx.member.delete({ where: { id: member.id } });
+				signalDeletion(rows[0].pid);
+				await release;
+			},
+			{ timeout: 5000 },
+		);
+		const blockerPid = await Promise.race([
+			deletionPid,
+			deletion.then(() => {
+				throw new Error("Deletion ended before barrier");
+			}),
+		]);
+		const isolated = new TestCustomerCareService(db);
+		const original = (
+			Reflect.get(isolated, "lockMembershipRole") as (
+				tx: Prisma.TransactionClient,
+				id: string,
+			) => Promise<unknown>
+		).bind(isolated);
+		Reflect.set(
+			isolated,
+			"lockMembershipRole",
+			async (tx: Prisma.TransactionClient, id: string) => {
+				if (id === actor) {
+					const rows = await tx.$queryRaw<
+						{ pid: number }[]
+					>`SELECT pg_backend_pid() AS pid`;
+					if (!rows[0]) throw new Error("Missing assignment backend PID");
+					signalAssignment(rows[0].pid);
+				}
+				return original(tx, id);
+			},
+		);
+		assignment = isolated
+			.configureCustomer(
+				{ id: imported.customerId, enrolled: false, ownerId: actor, tags: [] },
+				manager,
+			)
+			.then(
+				() => ({ allowed: true }),
+				(error: unknown) => ({ allowed: false, error }),
+			);
+		const waiterPid = await Promise.race([
+			assignmentPid,
+			assignment.then(() => {
+				throw new Error("Assignment ended before barrier");
+			}),
+		]);
+		await waitForDatabaseLock(waiterPid, blockerPid);
+		releaseDeletion();
+		await deletion;
+		const result = await assignment;
+		expect(result.allowed).toBe(false);
+		expect(result.error).toMatchObject({
+			status: 400,
+			message: "Nhân viên không thuộc workspace",
+		});
+		expect(
+			(
+				await db.careCustomer.findUniqueOrThrow({
+					where: { id: imported.customerId },
+				})
+			).ownerId,
+		).toBeNull();
+		expect(
+			await db.careEvent.count({ where: { customerId: imported.customerId } }),
+		).toBe(before);
+	} finally {
+		releaseDeletion();
+		if (deletion) await deletion.catch(() => {});
+		if (assignment) await assignment.catch(() => {});
+		await db.member.upsert({
+			where: { id: member.id },
+			create: member,
+			update: {},
+		});
+	}
+});
+
+test("manager demotion waits for an authorized customer resolution", async () => {
+	const imported = await service.importOrder(
+		fixture("concurrent-manager-role"),
+		manager,
+		now,
+	);
+	await service.configureCustomer(
+		{ id: imported.customerId, enrolled: false, ownerId: actor, tags: [] },
+		manager,
+	);
+	await db.careCustomer.update({
+		where: { id: imported.customerId },
+		data: { openIssue: true },
+	});
+	const member = await db.member.findUniqueOrThrow({
+		where: {
+			organizationId_userId: { organizationId: "workspace", userId: manager },
+		},
+	});
+	let releaseResolution = () => {};
+	let signalResolutionPid = (_pid: number) => {};
+	let signalDemotionPid = (_pid: number) => {};
+	const release = new Promise<void>((resolve) => {
+		releaseResolution = resolve;
+	});
+	const resolutionPid = new Promise<number>((resolve) => {
+		signalResolutionPid = resolve;
+	});
+	const demotionPid = new Promise<number>((resolve) => {
+		signalDemotionPid = resolve;
+	});
+	let resolving: ReturnType<CustomerCareService["resolveCustomer"]> | undefined;
+	let demotion: Promise<unknown> | undefined;
+	try {
+		const isolated = new CustomerCareService(db);
+		const original = (
+			Reflect.get(isolated, "lockMembershipRole") as (
+				tx: Prisma.TransactionClient,
+				id: string,
+			) => Promise<unknown>
+		).bind(isolated);
+		Reflect.set(
+			isolated,
+			"lockMembershipRole",
+			async (tx: Prisma.TransactionClient, id: string) => {
+				const result = await original(tx, id);
+				if (id === manager) {
+					const rows = await tx.$queryRaw<
+						{ pid: number }[]
+					>`SELECT pg_backend_pid() AS pid`;
+					if (!rows[0]) throw new Error("Missing resolution backend PID");
+					signalResolutionPid(rows[0].pid);
+					await release;
+				}
+				return result;
+			},
+		);
+		resolving = isolated.resolveCustomer(
+			imported.customerId,
+			manager,
+			"Synthetic resolution",
+			null,
+		);
+		const blockerPid = await Promise.race([
+			resolutionPid,
+			resolving.then(() => {
+				throw new Error("Resolution ended before barrier");
+			}),
+		]);
+		demotion = db.$transaction(
+			async (tx) => {
+				const rows = await tx.$queryRaw<
+					{ pid: number }[]
+				>`SELECT pg_backend_pid() AS pid`;
+				if (!rows[0]) throw new Error("Missing demotion backend PID");
+				signalDemotionPid(rows[0].pid);
+				await tx.member.update({
+					where: { id: member.id },
+					data: { role: "member" },
+				});
+			},
+			{ timeout: 5000 },
+		);
+		const waiterPid = await Promise.race([
+			demotionPid,
+			demotion.then(() => {
+				throw new Error("Demotion ended before barrier");
+			}),
+		]);
+		await waitForDatabaseLock(waiterPid, blockerPid);
+		releaseResolution();
+		expect((await resolving).openIssue).toBe(false);
+		await demotion;
+		await expect(
+			service.resolveCustomer(
+				imported.customerId,
+				manager,
+				"Synthetic resolution",
+				null,
+			),
+		).rejects.toThrow("Khách thuộc nhân viên khác");
+	} finally {
+		releaseResolution();
+		if (resolving) await resolving.catch(() => {});
+		if (demotion) await demotion.catch(() => {});
+		await db.member.update({
+			where: { id: member.id },
+			data: { role: member.role },
+		});
+	}
+});
+
+test("resolution waiting for manager demotion rejects the new role", async () => {
+	const imported = await service.importOrder(
+		fixture("demotion-before-resolution"),
+		manager,
+		now,
+	);
+	await service.configureCustomer(
+		{ id: imported.customerId, enrolled: false, ownerId: actor, tags: [] },
+		manager,
+	);
+	await db.careCustomer.update({
+		where: { id: imported.customerId },
+		data: { openIssue: true },
+	});
+	const member = await db.member.findUniqueOrThrow({
+		where: {
+			organizationId_userId: { organizationId: "workspace", userId: manager },
+		},
+	});
+	const eventCount = await db.careEvent.count({
+		where: { customerId: imported.customerId },
+	});
+	let releaseDemotion = () => {};
+	let signalDemotion = (_pid: number) => {};
+	let signalResolution = (_pid: number) => {};
+	const release = new Promise<void>((resolve) => {
+		releaseDemotion = resolve;
+	});
+	const demotionPid = new Promise<number>((resolve) => {
+		signalDemotion = resolve;
+	});
+	const resolutionPid = new Promise<number>((resolve) => {
+		signalResolution = resolve;
+	});
+	let demotion: Promise<unknown> | undefined;
+	let resolving: Promise<{ allowed: boolean; error?: unknown }> | undefined;
+	try {
+		demotion = db.$transaction(
+			async (tx) => {
+				const rows = await tx.$queryRaw<
+					{ pid: number }[]
+				>`SELECT pg_backend_pid() AS pid`;
+				if (!rows[0]) throw new Error("Missing demotion backend PID");
+				await tx.member.update({
+					where: { id: member.id },
+					data: { role: "member" },
+				});
+				signalDemotion(rows[0].pid);
+				await release;
+			},
+			{ timeout: 5000 },
+		);
+		const blockerPid = await Promise.race([
+			demotionPid,
+			demotion.then(() => {
+				throw new Error("Demotion ended before barrier");
+			}),
+		]);
+		const isolated = new CustomerCareService(db);
+		const original = (
+			Reflect.get(isolated, "lockMembershipRole") as (
+				tx: Prisma.TransactionClient,
+				id: string,
+			) => Promise<unknown>
+		).bind(isolated);
+		Reflect.set(
+			isolated,
+			"lockMembershipRole",
+			async (tx: Prisma.TransactionClient, id: string) => {
+				const rows = await tx.$queryRaw<
+					{ pid: number }[]
+				>`SELECT pg_backend_pid() AS pid`;
+				if (!rows[0]) throw new Error("Missing resolution backend PID");
+				signalResolution(rows[0].pid);
+				return original(tx, id);
+			},
+		);
+		resolving = isolated
+			.resolveCustomer(
+				imported.customerId,
+				manager,
+				"Synthetic resolution",
+				null,
+			)
+			.then(
+				() => ({ allowed: true }),
+				(error: unknown) => ({ allowed: false, error }),
+			);
+		const waiterPid = await Promise.race([
+			resolutionPid,
+			resolving.then(() => {
+				throw new Error("Resolution ended before barrier");
+			}),
+		]);
+		await waitForDatabaseLock(waiterPid, blockerPid);
+		releaseDemotion();
+		await demotion;
+		const outcome = await resolving;
+		expect(outcome.allowed).toBe(false);
+		expect(outcome.error).toMatchObject({
+			status: 403,
+			message: "Khách thuộc nhân viên khác",
+		});
+		expect(
+			(
+				await db.careCustomer.findUniqueOrThrow({
+					where: { id: imported.customerId },
+				})
+			).openIssue,
+		).toBe(true);
+		expect(
+			await db.careEvent.count({ where: { customerId: imported.customerId } }),
+		).toBe(eventCount);
+	} finally {
+		releaseDemotion();
+		if (demotion) await demotion.catch(() => {});
+		if (resolving) await resolving.catch(() => {});
+		await db.member.update({
+			where: { id: member.id },
+			data: { role: member.role },
+		});
+	}
+});
+
+beforeAll(async () => {
+	if (!new URL(process.env.TEST_DATABASE_URL ?? "").pathname.endsWith("_test"))
+		throw new Error("Isolated test database required");
+	await db.organization.upsert({
+		where: { id: "workspace" },
+		create: { id: "workspace", name: "Test", slug: "test", createdAt: now },
+		update: {},
+	});
+	for (const [id, role] of [
+		[actor, "member"],
+		[manager, "admin"],
+	] as const) {
+		await db.user.create({
+			data: {
+				id,
+				name: "Test",
+				email: `${id}@example.invalid`,
+				updatedAt: now,
+			},
+		});
+		await db.member.create({
+			data: {
+				id: crypto.randomUUID(),
+				organizationId: "workspace",
+				userId: id,
+				role,
+				createdAt: now,
+			},
+		});
+	}
+});
+
+afterAll(async () => {
+	const customers = await db.careCustomer.findMany({
+		where: { sourceCustomerId: { startsWith: prefix } },
+		select: { id: true },
+	});
+	const ids = customers.map((c) => c.id);
+	await db.careEvent.deleteMany({ where: { customerId: { in: ids } } });
+	await db.careTask.deleteMany({ where: { customerId: { in: ids } } });
+	await db.careOrder.deleteMany({ where: { customerId: { in: ids } } });
+	await db.careConversation.deleteMany({ where: { customerId: { in: ids } } });
+	await db.careCustomer.deleteMany({ where: { id: { in: ids } } });
+	await db.careTemplate.deleteMany({ where: { name: { startsWith: prefix } } });
+	await db.member.deleteMany({ where: { userId: { in: [actor, manager] } } });
+	await db.user.deleteMany({ where: { id: { in: [actor, manager] } } });
+	await db.$disconnect();
+});
+
+describe("pilot readiness preview", () => {
+	test("only managers preview explicitly selected customers without enrollment, task or copy writes", async () => {
+		const input = fixture("pilot-preview");
+		input.conversation.canSend = false;
+		const imported = await service.importOrder(input, manager, now);
+		await service.configureCustomer(
+			{
+				id: imported.customerId,
+				enrolled: false,
+				ownerId: actor,
+				tags: ["preview-only"],
+			},
+			manager,
+		);
+		const template = await service.saveTemplate(
+			{
+				brand: "UMEHA",
+				purpose: "CHECK_IN",
+				name: `${prefix}-pilot-preview`,
+				body: "{{customer}} sử dụng {{product}} thế nào ạ?",
+				requiredTags: ["preview-only"],
+				excludedTags: [],
+				validUntil: null,
+			},
+			manager,
+		);
+		const approved = await service.approveTemplate(
+			template.id,
+			manager,
+			true,
+			template.version,
+		);
+		const before = await db.careEvent.count({
+			where: { customerId: imported.customerId },
+		});
+		await expect(
+			service.pilotPreview({ ids: [imported.customerId] }, actor, now),
+		).rejects.toThrow("quản lý");
+		const report = await service.pilotPreview(
+			{ ids: [imported.customerId] },
+			manager,
+			now,
+		);
+		expect(report.readOnly).toBe(true);
+		expect(report.ready).toBe(1);
+		expect(report.rows[0]?.channelRestricted).toBe(true);
+		expect(report.rows[0]?.template).toEqual({
+			id: approved.id,
+			name: approved.name,
+			version: approved.version,
+		});
+		expect(
+			(
+				await db.careCustomer.findUniqueOrThrow({
+					where: { id: imported.customerId },
+				})
+			).enrolled,
+		).toBe(false);
+		expect(
+			await db.careTask.count({ where: { customerId: imported.customerId } }),
+		).toBe(0);
+		expect(
+			await db.careEvent.count({ where: { customerId: imported.customerId } }),
+		).toBe(before);
+		await service.configureCustomer(
+			{
+				id: imported.customerId,
+				enrolled: true,
+				ownerId: actor,
+				tags: ["preview-only"],
+			},
+			manager,
+		);
+		expect(
+			(await service.pilotPreview({ ids: [imported.customerId] }, manager, now))
+				.rows[0]?.reasons,
+		).toContain("Khách đã trong pilot");
+		await service.tick(now);
+		await service.configureCustomer(
+			{
+				id: imported.customerId,
+				enrolled: false,
+				ownerId: actor,
+				tags: ["preview-only"],
+			},
+			manager,
+		);
+		const stopped = await service.pilotPreview(
+			{ ids: [imported.customerId] },
+			manager,
+			now,
+		);
+		expect(stopped.ready).toBe(0);
+		expect(stopped.rows[0]?.reasons).toContain(
+			"Mốc chăm sóc này đã có công việc; kiểm tra lịch sử trước khi chọn pilot",
+		);
+	});
+
+	test("preview reports opt-out, source failure and newest pending order instead of a ready candidate", async () => {
+		const input = fixture("pilot-blocked");
+		const imported = await service.importOrder(input, manager, now);
+		await service.configureCustomer(
+			{ id: imported.customerId, enrolled: false, ownerId: actor, tags: [] },
+			manager,
+		);
+		await db.careCustomer.update({
+			where: { id: imported.customerId },
+			data: { optedOut: true },
+		});
+		await service.importOrder(
+			{
+				...input,
+				orderId: `${prefix}-newest-pending`,
+				sourceCreatedAt: fresh,
+				orderStatus: "PENDING",
+				deliveredAt: null,
+				deliveryEvidence: null,
+			},
+			manager,
+			now,
+		);
+		const key = `UMEHA:test-shop:${input.conversation.pageId}`;
+		await db.careSyncState.create({
+			data: { id: key, lastError: "POS_PAGE_INCOMPLETE", lastSuccessAt: now },
+		});
+		try {
+			const report = await service.pilotPreview(
+				{ ids: [imported.customerId] },
+				manager,
+				now,
+			);
+			expect(report.ready).toBe(0);
+			expect(report.rows[0]?.reasons).toContain("Khách từ chối liên hệ");
+			expect(report.rows[0]?.reasons).toContain(
+				"Nguồn đang có lỗi hoặc đồng bộ chưa đầy đủ",
+			);
+			expect(report.rows[0]?.deliveredAt).toBeNull();
+			expect(report.rows[0]?.template).toBeNull();
+		} finally {
+			await db.careSyncState.delete({ where: { id: key } });
+		}
+	});
+
+	test("preview rejects empty, duplicate, missing and oversized selections", async () => {
+		await expect(
+			service.pilotPreview({ ids: [] }, manager, now),
+		).rejects.toThrow();
+		await expect(
+			service.pilotPreview({ ids: ["duplicate", "duplicate"] }, manager, now),
+		).rejects.toThrow("trùng");
+		await expect(
+			service.pilotPreview({ ids: ["not-existing"] }, manager, now),
+		).rejects.toThrow("không còn tồn tại");
+		await expect(
+			service.pilotPreview(
+				{ ids: Array.from({ length: 101 }, (_, index) => `missing-${index}`) },
+				manager,
+				now,
+			),
+		).rejects.toThrow();
+	});
+});
+
+describe("care sync and reply recovery", () => {
+	test("approval checks the exact reviewed template version", async () => {
+		const first = await service.saveTemplate(
+			{
+				brand: "UMEHA",
+				purpose: "CHECK_IN",
+				name: `${prefix}-approval-version`,
+				body: "Bản đầu {{customer}}",
+				requiredTags: ["approval-only"],
+				excludedTags: [],
+				validUntil: null,
+			},
+			manager,
+		);
+		const edited = await service.saveTemplate(
+			{ ...first, body: "Bản sửa {{customer}}", validUntil: null },
+			manager,
+		);
+		await expect(
+			service.approveTemplate(first.id, manager, true, first.version),
+		).rejects.toThrow("Mẫu đã thay đổi");
+		expect(
+			(await db.careTemplate.findUniqueOrThrow({ where: { id: first.id } }))
+				.approvedAt,
+		).toBeNull();
+		const approved = await service.approveTemplate(
+			edited.id,
+			manager,
+			true,
+			edited.version,
+		);
+		expect(approved.body).toBe("Bản sửa {{customer}}");
+		await expect(
+			service.approveTemplate(first.id, manager, false, first.version),
+		).rejects.toThrow();
+		await service.approveTemplate(
+			approved.id,
+			manager,
+			false,
+			approved.version,
+		);
+	});
+
+	test("owner resolves a first-sync reply without a task and replay does not reopen it", async () => {
+		const input = fixture("resolve-without-task");
+		input.conversation.lastInboundAt = "2026-10-26T10:00:00Z";
+		const imported = await service.importOrder(input, manager, now);
+		await service.configureCustomer(
+			{ id: imported.customerId, enrolled: true, ownerId: actor, tags: [] },
+			manager,
+		);
+		await service.tick(now);
+		expect(
+			await db.careTask.count({ where: { customerId: imported.customerId } }),
+		).toBe(0);
+		await expect(
+			service.resolveCustomer(
+				imported.customerId,
+				`${prefix}-other`,
+				"Đã xử lý",
+				input.conversation.lastInboundAt,
+			),
+		).rejects.toThrow();
+		await expect(
+			service.resolveCustomer(
+				imported.customerId,
+				actor,
+				"",
+				input.conversation.lastInboundAt,
+			),
+		).rejects.toThrow();
+		await service.resolveCustomer(
+			imported.customerId,
+			actor,
+			"Đã giải đáp trong Pancake",
+			input.conversation.lastInboundAt,
+		);
+		await service.importOrder(input, manager, now);
+		await service.importOrder(
+			{
+				...input,
+				conversation: { ...input.conversation, lastInboundAt: null },
+			},
+			manager,
+			now,
+		);
+		await service.importOrder(input, manager, now);
+		expect(
+			(
+				await db.careCustomer.findUniqueOrThrow({
+					where: { id: imported.customerId },
+				})
+			).replyPending,
+		).toBe(false);
+		await service.tick(now);
+		expect(
+			await db.careTask.count({ where: { customerId: imported.customerId } }),
+		).toBe(1);
+		await service.importOrder(
+			{
+				...input,
+				conversation: {
+					...input.conversation,
+					lastInboundAt: "2026-10-27T02:00:00Z",
+				},
+			},
+			manager,
+			now,
+		);
+		expect(
+			(
+				await db.careCustomer.findUniqueOrThrow({
+					where: { id: imported.customerId },
+				})
+			).replyPending,
+		).toBe(true);
+		await expect(
+			service.resolveCustomer(
+				imported.customerId,
+				actor,
+				"Đã đọc phản hồi cũ",
+				input.conversation.lastInboundAt,
+			),
+		).rejects.toThrow("phản hồi mới");
+		const staleTask = await db.careTask.findFirstOrThrow({
+			where: { customerId: imported.customerId },
+		});
+		await expect(
+			service.action(
+				{
+					id: staleTask.id,
+					version: staleTask.version,
+					result: "RESOLVED",
+					reason: "Đã xử lý phản hồi cũ",
+					expectedInboundAt: input.conversation.lastInboundAt,
+				},
+				actor,
+				now,
+			),
+		).rejects.toThrow("phản hồi mới");
+		await service.resolveCustomer(
+			imported.customerId,
+			actor,
+			"Đã xử lý phản hồi mới",
+			"2026-10-27T02:00:00Z",
+		);
+	});
+
+	test("customer resolution closes support tasks and preserves promises, opt-out and uncertainty", async () => {
+		const task = await enrolled("resolve-support");
+		await service.action(
+			{
+				id: task.id,
+				version: task.version,
+				result: "ISSUE",
+				reason: "Cần hỗ trợ",
+			},
+			actor,
+			now,
+		);
+		const promiseAt = new Date("2026-10-29T02:00:00Z");
+		const promise = await db.careTask.create({
+			data: {
+				customerId: task.customerId,
+				orderId: task.orderId,
+				milestone: 5,
+				purpose: "USE_VALUE",
+				dueAt: promiseAt,
+				state: "WAITING",
+				outcome: "PROMISED",
+			},
+		});
+		await db.careCustomer.update({
+			where: { id: task.customerId },
+			data: { pausedUntil: promiseAt, optedOut: true },
+		});
+		await service.resolveCustomer(
+			task.customerId,
+			actor,
+			"Đã xử lý hỗ trợ",
+			null,
+		);
+		expect(
+			(await db.careTask.findUniqueOrThrow({ where: { id: task.id } })).state,
+		).toBe("DONE");
+		expect(
+			(await db.careTask.findUniqueOrThrow({ where: { id: promise.id } }))
+				.state,
+		).toBe("WAITING");
+		const customer = await db.careCustomer.findUniqueOrThrow({
+			where: { id: task.customerId },
+		});
+		expect(customer.pausedUntil?.toISOString()).toBe(promiseAt.toISOString());
+		expect(customer.optedOut).toBe(true);
+		expect(customer.lastTouchAt).toBeNull();
+		await db.careCustomer.update({
+			where: { id: task.customerId },
+			data: { uncertain: true, openIssue: true },
+		});
+		await expect(
+			service.resolveCustomer(
+				task.customerId,
+				actor,
+				"Không được vượt đối soát",
+				null,
+			),
+		).rejects.toThrow("đối soát");
+	});
+
+	test("source health blocks claim and confirmation after an incomplete sync", async () => {
+		const task = await enrolled("source-health");
+		const input = fixture("source-health");
+		const key = `UMEHA:test-shop:${input.conversation.pageId}`;
+		const saved = {
+			channels: process.env.CARE_CHANNELS_JSON,
+			key: process.env.CARE_POS_API_KEY,
+			tokens: process.env.CARE_PANCAKE_TOKENS_JSON,
+		};
+		process.env.CARE_CHANNELS_JSON = "test-configuration";
+		process.env.CARE_POS_API_KEY = "test-only";
+		process.env.CARE_PANCAKE_TOKENS_JSON = "test-only";
+		try {
+			await expect(service.claim(task.id, actor, now)).rejects.toThrow(
+				"đồng bộ đầy đủ",
+			);
+			await db.careSyncState.create({
+				data: { id: key, lastSuccessAt: now, leaseToken: "in-flight" },
+			});
+			await expect(service.claim(task.id, actor, now)).rejects.toThrow(
+				"đang cập nhật",
+			);
+			await db.careSyncState.update({
+				where: { id: key },
+				data: { leaseToken: null, lastError: "POS_DUPLICATE_ORDER" },
+			});
+			await expect(service.claim(task.id, actor, now)).rejects.toThrow(
+				"chưa đầy đủ",
+			);
+			await db.careSyncState.update({
+				where: { id: key },
+				data: { lastError: null },
+			});
+			await service.claim(task.id, actor, now);
+			const template = await service.saveTemplate(
+				{
+					brand: "UMEHA",
+					purpose: "CHECK_IN",
+					name: `${prefix}-source-health`,
+					body: "{{customer}} cần hỗ trợ gì ạ?",
+					requiredTags: ["source-health"],
+					excludedTags: [],
+					validUntil: null,
+				},
+				manager,
+			);
+			await service.approveTemplate(
+				template.id,
+				manager,
+				true,
+				template.version,
+			);
+			await service.configureCustomer(
+				{
+					id: task.customerId,
+					enrolled: true,
+					ownerId: actor,
+					tags: ["source-health"],
+				},
+				manager,
+			);
+			const prepared = await service.copy(task.id, actor, now);
+			await db.careSyncState.update({
+				where: { id: key },
+				data: { lastError: "SOURCE_HTTP_429" },
+			});
+			await expect(
+				service.action(
+					{
+						id: task.id,
+						version: prepared.version,
+						result: "SENT_MANUAL",
+						reason: "",
+					},
+					actor,
+					now,
+				),
+			).rejects.toThrow("chưa đầy đủ");
+			expect(
+				(
+					await db.careCustomer.findUniqueOrThrow({
+						where: { id: task.customerId },
+					})
+				).lastTouchAt,
+			).toBeNull();
+			delete process.env.CARE_POS_API_KEY;
+			await expect(
+				service.action(
+					{
+						id: task.id,
+						version: prepared.version,
+						result: "SENT_MANUAL",
+						reason: "",
+					},
+					actor,
+					now,
+				),
+			).rejects.toThrow("chưa đầy đủ");
+		} finally {
+			for (const [name, value] of [
+				["CARE_CHANNELS_JSON", saved.channels],
+				["CARE_POS_API_KEY", saved.key],
+				["CARE_PANCAKE_TOKENS_JSON", saved.tokens],
+			] as const) {
+				if (value === undefined) delete process.env[name];
+				else process.env[name] = value;
+			}
+			await db.careSyncState.deleteMany({ where: { id: key } });
+		}
+	});
+
+	test("source writes reject expired, replaced and cross-scope lease tokens", async () => {
+		const input = fixture("source-fence");
+		const key = `UMEHA:test-shop:${input.conversation.pageId}`;
+		await db.careSyncState.create({
+			data: {
+				id: key,
+				leaseToken: "current",
+				leaseUntil: new Date(Date.now() + 60_000),
+			},
+		});
+		try {
+			await expect(
+				service.importOrder(input, "source-sync", now, {
+					id: key,
+					token: "old",
+				}),
+			).rejects.toThrow("SOURCE_LEASE_LOST");
+			await db.careSyncState.update({
+				where: { id: key },
+				data: { leaseUntil: new Date(Date.now() - 60_000) },
+			});
+			await expect(
+				service.importOrder(input, "source-sync", now, {
+					id: key,
+					token: "current",
+				}),
+			).rejects.toThrow("SOURCE_LEASE_LOST");
+			expect(
+				await db.careCustomer.count({
+					where: { sourceCustomerId: input.customerId },
+				}),
+			).toBe(0);
+			await db.careSyncState.update({
+				where: { id: key },
+				data: { leaseUntil: new Date(Date.now() + 60_000) },
+			});
+			await service.importOrder(input, "source-sync", now, {
+				id: key,
+				token: "current",
+			});
+			await db.careSyncState.update({
+				where: { id: key },
+				data: { leaseToken: "replacement" },
+			});
+			await expect(
+				service.importOrder(
+					{ ...input, customerName: "Không được ghi" },
+					"source-sync",
+					now,
+					{ id: key, token: "current" },
+				),
+			).rejects.toThrow("SOURCE_LEASE_LOST");
+			await expect(
+				service.importOrder(
+					{ ...input, brand: "LI_EN_SPORT" },
+					"source-sync",
+					now,
+					{ id: key, token: "replacement" },
+				),
+			).rejects.toThrow("SOURCE_SCOPE_MISMATCH");
+		} finally {
+			await db.careSyncState.delete({ where: { id: key } });
+		}
+	});
+});
+
+test("copy waiting for template revocation fails without preparing content", async () => {
+	const task = await enrolled("copy-revoked-race");
+	const tag = "copy-revoked-race";
+	await service.configureCustomer(
+		{ id: task.customerId, enrolled: true, ownerId: actor, tags: [tag] },
+		manager,
+	);
+	const draft = await service.saveTemplate(
+		{
+			brand: "UMEHA",
+			purpose: "CHECK_IN",
+			name: `${prefix}-copy-revoked-race`,
+			body: "Chào {{customer}}",
+			requiredTags: [tag],
+			excludedTags: [],
+			validUntil: null,
+		},
+		manager,
+	);
+	await service.approveTemplate(draft.id, manager, true, draft.version);
+	await service.claim(task.id, actor, now);
+	let releaseRevocation = () => {};
+	let signalRevocation = (_pid: number) => {};
+	let signalCopy = (_pid: number) => {};
+	const release = new Promise<void>((resolve) => {
+		releaseRevocation = resolve;
+	});
+	const revocationPid = new Promise<number>((resolve) => {
+		signalRevocation = resolve;
+	});
+	const copyPid = new Promise<number>((resolve) => {
+		signalCopy = resolve;
+	});
+	let revocation: Promise<unknown> | undefined;
+	let copying: Promise<{ allowed: boolean; error?: unknown }> | undefined;
+	try {
+		revocation = db.$transaction(
+			async (tx) => {
+				const rows = await tx.$queryRaw<
+					{ pid: number }[]
+				>`SELECT pg_backend_pid() AS pid`;
+				if (!rows[0]) throw new Error("Missing revocation backend PID");
+				await tx.careTemplate.update({
+					where: { id: draft.id },
+					data: {
+						approvedAt: null,
+						approvedBy: null,
+						version: { increment: 1 },
+					},
+				});
+				signalRevocation(rows[0].pid);
+				await release;
+			},
+			{ timeout: 5000 },
+		);
+		const blockerPid = await Promise.race([
+			revocationPid,
+			revocation.then(() => {
+				throw new Error("Revocation ended before barrier");
+			}),
+		]);
+		const isolated = new CustomerCareService(db);
+		const original = (
+			Reflect.get(isolated, "lockTemplate") as (
+				tx: Prisma.TransactionClient,
+				id: string,
+			) => Promise<void>
+		).bind(isolated);
+		Reflect.set(
+			isolated,
+			"lockTemplate",
+			async (tx: Prisma.TransactionClient, id: string) => {
+				const rows = await tx.$queryRaw<
+					{ pid: number }[]
+				>`SELECT pg_backend_pid() AS pid`;
+				if (!rows[0]) throw new Error("Missing copy backend PID");
+				signalCopy(rows[0].pid);
+				return original(tx, id);
+			},
+		);
+		copying = isolated.copy(task.id, actor, now).then(
+			() => ({ allowed: true }),
+			(error: unknown) => ({ allowed: false, error }),
+		);
+		const waiterPid = await Promise.race([
+			copyPid,
+			copying.then(() => {
+				throw new Error("Copy ended before barrier");
+			}),
+		]);
+		await waitForDatabaseLock(waiterPid, blockerPid);
+		releaseRevocation();
+		await revocation;
+		const result = await copying;
+		expect(result.allowed).toBe(false);
+		expect(result.error).toMatchObject({
+			status: 409,
+			message: "Mẫu đã thay đổi hoặc hết hiệu lực",
+		});
+		const after = await db.careTask.findUniqueOrThrow({
+			where: { id: task.id },
+		});
+		expect(after.state).toBe("CLAIMED");
+		expect(after.snapshot).toBeNull();
+		expect(
+			await db.careEvent.count({
+				where: { taskId: task.id, kind: "COPY_PREPARED" },
+			}),
+		).toBe(0);
+	} finally {
+		releaseRevocation();
+		if (revocation) await revocation.catch(() => {});
+		if (copying) await copying.catch(() => {});
+	}
+});
+test("manual confirmation waiting for template revocation fails without a sent event", async () => {
+	const task = await enrolled("confirm-revoked-race");
+	const tag = "confirm-revoked-race";
+	await service.configureCustomer(
+		{ id: task.customerId, enrolled: true, ownerId: actor, tags: [tag] },
+		manager,
+	);
+	const draft = await service.saveTemplate(
+		{
+			brand: "UMEHA",
+			purpose: "CHECK_IN",
+			name: `${prefix}-confirm-revoked-race`,
+			body: "Chào {{customer}}",
+			requiredTags: [tag],
+			excludedTags: [],
+			validUntil: null,
+		},
+		manager,
+	);
+	await service.approveTemplate(draft.id, manager, true, draft.version);
+	await service.claim(task.id, actor, now);
+	const copied = await service.copy(task.id, actor, now);
+	let releaseRevocation = () => {};
+	let signalRevocation = (_pid: number) => {};
+	let signalConfirmation = (_pid: number) => {};
+	const release = new Promise<void>((resolve) => {
+		releaseRevocation = resolve;
+	});
+	const revocationPid = new Promise<number>((resolve) => {
+		signalRevocation = resolve;
+	});
+	const confirmationPid = new Promise<number>((resolve) => {
+		signalConfirmation = resolve;
+	});
+	let revocation: Promise<unknown> | undefined;
+	let confirmation: Promise<{ allowed: boolean; error?: unknown }> | undefined;
+	try {
+		revocation = db.$transaction(
+			async (tx) => {
+				const rows = await tx.$queryRaw<
+					{ pid: number }[]
+				>`SELECT pg_backend_pid() AS pid`;
+				if (!rows[0]) throw new Error("Missing revocation backend PID");
+				await tx.careTemplate.update({
+					where: { id: draft.id },
+					data: {
+						approvedAt: null,
+						approvedBy: null,
+						version: { increment: 1 },
+					},
+				});
+				signalRevocation(rows[0].pid);
+				await release;
+			},
+			{ timeout: 5000 },
+		);
+		const blockerPid = await Promise.race([
+			revocationPid,
+			revocation.then(() => {
+				throw new Error("Revocation ended before barrier");
+			}),
+		]);
+		const isolated = new CustomerCareService(db);
+		const original = (
+			Reflect.get(isolated, "lockTemplate") as (
+				tx: Prisma.TransactionClient,
+				id: string,
+			) => Promise<void>
+		).bind(isolated);
+		Reflect.set(
+			isolated,
+			"lockTemplate",
+			async (tx: Prisma.TransactionClient, id: string) => {
+				const rows = await tx.$queryRaw<
+					{ pid: number }[]
+				>`SELECT pg_backend_pid() AS pid`;
+				if (!rows[0]) throw new Error("Missing confirmation backend PID");
+				signalConfirmation(rows[0].pid);
+				return original(tx, id);
+			},
+		);
+		confirmation = isolated
+			.action(
+				{
+					id: task.id,
+					version: copied.version,
+					result: "SENT_MANUAL",
+					reason: "Synthetic test",
+				},
+				actor,
+				now,
+			)
+			.then(
+				() => ({ allowed: true }),
+				(error: unknown) => ({ allowed: false, error }),
+			);
+		const waiterPid = await Promise.race([
+			confirmationPid,
+			confirmation.then(() => {
+				throw new Error("Confirmation ended before barrier");
+			}),
+		]);
+		await waitForDatabaseLock(waiterPid, blockerPid);
+		releaseRevocation();
+		await revocation;
+		const result = await confirmation;
+		expect(result.allowed).toBe(false);
+		expect(result.error).toMatchObject({
+			status: 409,
+			message: "Mẫu đã thay đổi hoặc hết hiệu lực",
+		});
+		const after = await db.careTask.findUniqueOrThrow({
+			where: { id: task.id },
+		});
+		expect(after.state).toBe("COPIED");
+		expect(after.snapshot).toBe(copied.text);
+		expect(
+			await db.careEvent.count({
+				where: { taskId: task.id, kind: "SENT_MANUAL" },
+			}),
+		).toBe(0);
+	} finally {
+		releaseRevocation();
+		if (revocation) await revocation.catch(() => {});
+		if (confirmation) await confirmation.catch(() => {});
+	}
+});
+
+test("template revocation waits for an authorized manual confirmation", async () => {
+	const task = await enrolled("confirm-first-race");
+	const tag = "confirm-first-race";
+	await service.configureCustomer(
+		{ id: task.customerId, enrolled: true, ownerId: actor, tags: [tag] },
+		manager,
+	);
+	const draft = await service.saveTemplate(
+		{
+			brand: "UMEHA",
+			purpose: "CHECK_IN",
+			name: `${prefix}-confirm-first-race`,
+			body: "Chào {{customer}}",
+			requiredTags: [tag],
+			excludedTags: [],
+			validUntil: null,
+		},
+		manager,
+	);
+	await service.approveTemplate(draft.id, manager, true, draft.version);
+	await service.claim(task.id, actor, now);
+	const copied = await service.copy(task.id, actor, now);
+	let releaseConfirmation = () => {};
+	let signalConfirmation = (_pid: number) => {};
+	let signalRevocation = (_pid: number) => {};
+	const release = new Promise<void>((resolve) => {
+		releaseConfirmation = resolve;
+	});
+	const confirmationPid = new Promise<number>((resolve) => {
+		signalConfirmation = resolve;
+	});
+	const revocationPid = new Promise<number>((resolve) => {
+		signalRevocation = resolve;
+	});
+	let confirmation: ReturnType<CustomerCareService["action"]> | undefined;
+	let revocation: Promise<unknown> | undefined;
+	try {
+		const isolated = new CustomerCareService(db);
+		const original = (
+			Reflect.get(isolated, "lockTemplate") as (
+				tx: Prisma.TransactionClient,
+				id: string,
+			) => Promise<void>
+		).bind(isolated);
+		Reflect.set(
+			isolated,
+			"lockTemplate",
+			async (tx: Prisma.TransactionClient, id: string) => {
+				await original(tx, id);
+				const rows = await tx.$queryRaw<
+					{ pid: number }[]
+				>`SELECT pg_backend_pid() AS pid`;
+				if (!rows[0]) throw new Error("Missing confirmation backend PID");
+				signalConfirmation(rows[0].pid);
+				await release;
+			},
+		);
+		confirmation = isolated.action(
+			{
+				id: task.id,
+				version: copied.version,
+				result: "SENT_MANUAL",
+				reason: "Synthetic test",
+			},
+			actor,
+			now,
+		);
+		const blockerPid = await Promise.race([
+			confirmationPid,
+			confirmation.then(() => {
+				throw new Error("Confirmation ended before barrier");
+			}),
+		]);
+		revocation = db.$transaction(
+			async (tx) => {
+				const rows = await tx.$queryRaw<
+					{ pid: number }[]
+				>`SELECT pg_backend_pid() AS pid`;
+				if (!rows[0]) throw new Error("Missing revocation backend PID");
+				signalRevocation(rows[0].pid);
+				await tx.careTemplate.update({
+					where: { id: draft.id },
+					data: {
+						approvedAt: null,
+						approvedBy: null,
+						version: { increment: 1 },
+					},
+				});
+			},
+			{ timeout: 5000 },
+		);
+		const waiterPid = await Promise.race([
+			revocationPid,
+			revocation.then(() => {
+				throw new Error("Revocation ended before barrier");
+			}),
+		]);
+		await waitForDatabaseLock(waiterPid, blockerPid);
+		releaseConfirmation();
+		expect((await confirmation).state).toBe("DONE");
+		await revocation;
+		expect(
+			await db.careEvent.count({
+				where: { taskId: task.id, kind: "SENT_MANUAL" },
+			}),
+		).toBe(1);
+		expect(
+			(await db.careTemplate.findUniqueOrThrow({ where: { id: draft.id } }))
+				.approvedAt,
+		).toBeNull();
+	} finally {
+		releaseConfirmation();
+		if (confirmation) await confirmation.catch(() => {});
+		if (revocation) await revocation.catch(() => {});
+	}
+});
+
+test.each(["template", "customer", "conversation"] as const)(
+	"manual confirmation rejects %s expiry during template lock",
+	async (expiry) => {
+		const task = await enrolled(`confirm-expired-${expiry}`);
+		const tag = `confirm-expired-${expiry}`;
+		await service.configureCustomer(
+			{ id: task.customerId, enrolled: true, ownerId: actor, tags: [tag] },
+			manager,
+		);
+		const draft = await service.saveTemplate(
+			{
+				brand: "UMEHA",
+				purpose: "CHECK_IN",
+				name: `${prefix}-${tag}`,
+				body: "Chào {{customer}}",
+				requiredTags: [tag],
+				excludedTags: [],
+				validUntil: null,
+			},
+			manager,
+		);
+		await service.approveTemplate(draft.id, manager, true, draft.version);
+		await service.claim(task.id, actor, now);
+		const copied = await service.copy(task.id, actor, now);
+		if (expiry === "template") {
+			await db.careTemplate.update({
+				where: { id: draft.id },
+				data: { validUntil: new Date(now.getTime() + 100) },
+			});
+		} else if (expiry === "customer") {
+			const nearlyStale = new Date(now.getTime() - CARE.freshMs + 100);
+			await db.careCustomer.update({
+				where: { id: task.customerId },
+				data: { syncedAt: nearlyStale },
+			});
+		} else {
+			const nearlyStale = new Date(now.getTime() - CARE.freshMs + 100);
+			await db.careConversation.updateMany({
+				where: { customerId: task.customerId },
+				data: { activityVerifiedAt: nearlyStale, verifiedAt: nearlyStale },
+			});
+		}
+		const isolated = new CustomerCareService(db);
+		const original = (
+			Reflect.get(isolated, "lockTemplate") as (
+				tx: Prisma.TransactionClient,
+				id: string,
+			) => Promise<void>
+		).bind(isolated);
+		Reflect.set(
+			isolated,
+			"lockTemplate",
+			async (tx: Prisma.TransactionClient, id: string) => {
+				await original(tx, id);
+				await new Promise((resolve) => setTimeout(resolve, 250));
+			},
+		);
+		await expect(
+			isolated.action(
+				{
+					id: task.id,
+					version: copied.version,
+					result: "SENT_MANUAL",
+					reason: "Synthetic test",
+				},
+				actor,
+				now,
+			),
+		).rejects.toMatchObject({
+			status: 409,
+			message:
+				expiry === "template"
+					? "Mẫu đã thay đổi hoặc hết hiệu lực"
+					: "Cần đồng bộ dữ liệu mới trước khi liên hệ",
+		});
+		const after = await db.careTask.findUniqueOrThrow({
+			where: { id: task.id },
+		});
+		expect(after.state).toBe("COPIED");
+		expect(after.snapshot).toBe(copied.text);
+		expect(after.confirmedAt).toBeNull();
+		expect(
+			await db.careEvent.count({
+				where: { taskId: task.id, kind: "SENT_MANUAL" },
+			}),
+		).toBe(0);
+	},
+);
+
+test.each(["customer", "conversation"] as const)(
+	"copy rejects %s freshness expiry during template lock",
+	async (source) => {
+		const tag = `copy-expired-${source}`;
+		const task = await enrolled(tag);
+		await service.configureCustomer(
+			{ id: task.customerId, enrolled: true, ownerId: actor, tags: [tag] },
+			manager,
+		);
+		const draft = await service.saveTemplate(
+			{
+				brand: "UMEHA",
+				purpose: "CHECK_IN",
+				name: `${prefix}-${tag}`,
+				body: "Chào {{customer}}",
+				requiredTags: [tag],
+				excludedTags: [],
+				validUntil: null,
+			},
+			manager,
+		);
+		await service.approveTemplate(draft.id, manager, true, draft.version);
+		await service.claim(task.id, actor, now);
+		const nearlyStale = new Date(now.getTime() - CARE.freshMs + 100);
+		if (source === "customer") {
+			await db.careCustomer.update({
+				where: { id: task.customerId },
+				data: { syncedAt: nearlyStale },
+			});
+		} else {
+			await db.careConversation.updateMany({
+				where: { customerId: task.customerId },
+				data: { activityVerifiedAt: nearlyStale, verifiedAt: nearlyStale },
+			});
+		}
+		const isolated = new CustomerCareService(db);
+		const original = (
+			Reflect.get(isolated, "lockTemplate") as (
+				tx: Prisma.TransactionClient,
+				id: string,
+			) => Promise<void>
+		).bind(isolated);
+		Reflect.set(
+			isolated,
+			"lockTemplate",
+			async (tx: Prisma.TransactionClient, id: string) => {
+				await original(tx, id);
+				await new Promise((resolve) => setTimeout(resolve, 250));
+			},
+		);
+		await expect(isolated.copy(task.id, actor, now)).rejects.toMatchObject({
+			status: 409,
+			message: "Cần đồng bộ dữ liệu mới trước khi liên hệ",
+		});
+		const after = await db.careTask.findUniqueOrThrow({
+			where: { id: task.id },
+		});
+		expect(after.state).toBe("CLAIMED");
+		expect(after.snapshot).toBeNull();
+		expect(
+			await db.careEvent.count({
+				where: { taskId: task.id, kind: "COPY_PREPARED" },
+			}),
+		).toBe(0);
+	},
+);
+
+test("copy rejects a template that expires while its row is locked", async () => {
+	const task = await enrolled("copy-expired-template");
+	const tag = "copy-expired-template";
+	await service.configureCustomer(
+		{ id: task.customerId, enrolled: true, ownerId: actor, tags: [tag] },
+		manager,
+	);
+	const draft = await service.saveTemplate(
+		{
+			brand: "UMEHA",
+			purpose: "CHECK_IN",
+			name: `${prefix}-copy-expired-template`,
+			body: "Chào {{customer}}",
+			requiredTags: [tag],
+			excludedTags: [],
+			validUntil: new Date(now.getTime() + 100).toISOString(),
+		},
+		manager,
+	);
+	await service.approveTemplate(draft.id, manager, true, draft.version);
+	await service.claim(task.id, actor, now);
+	const isolated = new CustomerCareService(db);
+	const original = (
+		Reflect.get(isolated, "lockTemplate") as (
+			tx: Prisma.TransactionClient,
+			id: string,
+		) => Promise<void>
+	).bind(isolated);
+	Reflect.set(
+		isolated,
+		"lockTemplate",
+		async (tx: Prisma.TransactionClient, id: string) => {
+			await original(tx, id);
+			await new Promise((resolve) => setTimeout(resolve, 250));
+		},
+	);
+	await expect(isolated.copy(task.id, actor, now)).rejects.toMatchObject({
+		status: 409,
+		message: "Mẫu đã thay đổi hoặc hết hiệu lực",
+	});
+	const after = await db.careTask.findUniqueOrThrow({ where: { id: task.id } });
+	expect(after.state).toBe("CLAIMED");
+	expect(after.snapshot).toBeNull();
+	expect(
+		await db.careEvent.count({
+			where: { taskId: task.id, kind: "COPY_PREPARED" },
+		}),
+	).toBe(0);
+});
+
+test.each(["copy", "confirmation"] as const)(
+	"%s rejects channel sync freshness expiry during template lock",
+	async (operation) => {
+		const tag = `channel-boundary-${operation}`;
+		const input = fixture(tag);
+		input.conversation.pageId = `${prefix}-${tag}`;
+		const imported = await service.importOrder(input, manager, now);
+		const sourceId = `UMEHA:test-shop:${input.conversation.pageId}`;
+		await service.configureCustomer(
+			{ id: imported.customerId, enrolled: true, ownerId: actor, tags: [tag] },
+			manager,
+		);
+		await service.tick(now);
+		const task = await db.careTask.findFirstOrThrow({
+			where: { customerId: imported.customerId },
+		});
+		const draft = await service.saveTemplate(
+			{
+				brand: "UMEHA",
+				purpose: "CHECK_IN",
+				name: `${prefix}-${tag}`,
+				body: "Chào {{customer}}",
+				requiredTags: [tag],
+				excludedTags: [],
+				validUntil: null,
+			},
+			manager,
+		);
+		await service.approveTemplate(draft.id, manager, true, draft.version);
+		await db.careSyncState.create({
+			data: { id: sourceId, lastSuccessAt: now },
+		});
+		try {
+			await service.claim(task.id, actor, now);
+			const copied =
+				operation === "confirmation"
+					? await service.copy(task.id, actor, now)
+					: null;
+			await db.careSyncState.update({
+				where: { id: sourceId },
+				data: { lastSuccessAt: new Date(now.getTime() - CARE.freshMs + 100) },
+			});
+			const isolated = new CustomerCareService(db);
+			const original = (
+				Reflect.get(isolated, "lockTemplate") as (
+					tx: Prisma.TransactionClient,
+					id: string,
+				) => Promise<void>
+			).bind(isolated);
+			Reflect.set(
+				isolated,
+				"lockTemplate",
+				async (tx: Prisma.TransactionClient, id: string) => {
+					await original(tx, id);
+					await new Promise((resolve) => setTimeout(resolve, 250));
+				},
+			);
+			const attempt = copied
+				? isolated.action(
+						{
+							id: task.id,
+							version: copied.version,
+							result: "SENT_MANUAL",
+							reason: "Synthetic test",
+						},
+						actor,
+						now,
+					)
+				: isolated.copy(task.id, actor, now);
+			await expect(attempt).rejects.toMatchObject({
+				status: 409,
+				message: "Chưa xác minh lượt đồng bộ gần đây",
+			});
+			const after = await db.careTask.findUniqueOrThrow({
+				where: { id: task.id },
+			});
+			expect(after.state).toBe(copied ? "COPIED" : "CLAIMED");
+			expect(after.snapshot).toBe(copied?.text ?? null);
+			expect(after.confirmedAt).toBeNull();
+			expect(
+				await db.careEvent.count({
+					where: { taskId: task.id, kind: "SENT_MANUAL" },
+				}),
+			).toBe(0);
+			if (!copied)
+				expect(
+					await db.careEvent.count({
+						where: { taskId: task.id, kind: "COPY_PREPARED" },
+					}),
+				).toBe(0);
+		} finally {
+			await db.careSyncState.deleteMany({ where: { id: sourceId } });
+		}
+	},
+);
+
+test.each(["copy", "confirmation"] as const)(
+	"%s rejects a D+x milestone change while waiting on a template",
+	async (operation) => {
+		const tag = `milestone-boundary-${operation}`;
+		const task = await enrolled(tag);
+		expect(task.milestone).toBe(1);
+		await service.configureCustomer(
+			{ id: task.customerId, enrolled: true, ownerId: actor, tags: [tag] },
+			manager,
+		);
+		const order = await db.careOrder.findUniqueOrThrow({
+			where: { id: task.orderId },
+		});
+		if (!order.deliveredAt)
+			throw new Error("Synthetic order must have delivery date");
+		const boundary = new Date(careDueAt(order.deliveredAt, 5).getTime() - 100);
+		const before = new Date(boundary.getTime() - 1000);
+		await db.careCustomer.update({
+			where: { id: task.customerId },
+			data: { syncedAt: before },
+		});
+		await db.careConversation.updateMany({
+			where: { customerId: task.customerId },
+			data: { activityVerifiedAt: before, verifiedAt: before },
+		});
+		const draft = await service.saveTemplate(
+			{
+				brand: "UMEHA",
+				purpose: "CHECK_IN",
+				name: `${prefix}-${tag}`,
+				body: "Chào {{customer}}",
+				requiredTags: [tag],
+				excludedTags: [],
+				validUntil: null,
+			},
+			manager,
+		);
+		await service.approveTemplate(draft.id, manager, true, draft.version);
+		await service.claim(task.id, actor, before);
+		const copied =
+			operation === "confirmation"
+				? await service.copy(task.id, actor, before)
+				: null;
+		const isolated = new CustomerCareService(db);
+		const original = (
+			Reflect.get(isolated, "lockTemplate") as (
+				tx: Prisma.TransactionClient,
+				id: string,
+			) => Promise<void>
+		).bind(isolated);
+		Reflect.set(
+			isolated,
+			"lockTemplate",
+			async (tx: Prisma.TransactionClient, id: string) => {
+				await original(tx, id);
+				await new Promise((resolve) => setTimeout(resolve, 250));
+			},
+		);
+		const attempt = copied
+			? isolated.action(
+					{
+						id: task.id,
+						version: copied.version,
+						result: "SENT_MANUAL",
+						reason: "Synthetic test",
+					},
+					actor,
+					boundary,
+				)
+			: isolated.copy(task.id, actor, boundary);
+		await expect(attempt).rejects.toMatchObject({
+			status: 409,
+			message: "Đơn hoặc mốc chăm sóc đã thay đổi",
+		});
+		const after = await db.careTask.findUniqueOrThrow({
+			where: { id: task.id },
+		});
+		expect(after.state).toBe(copied ? "COPIED" : "CLAIMED");
+		expect(after.snapshot).toBe(copied?.text ?? null);
+		expect(after.confirmedAt).toBeNull();
+		expect(
+			await db.careEvent.count({
+				where: { taskId: task.id, kind: "SENT_MANUAL" },
+			}),
+		).toBe(0);
+		if (!copied)
+			expect(
+				await db.careEvent.count({
+					where: { taskId: task.id, kind: "COPY_PREPARED" },
+				}),
+			).toBe(0);
+	},
+);
+
+test("successful copy and confirmation timestamps include time spent waiting", async () => {
+	const task = await enrolled("template-wait-timestamps");
+	const tag = "template-wait-timestamps";
+	await service.configureCustomer(
+		{ id: task.customerId, enrolled: true, ownerId: actor, tags: [tag] },
+		manager,
+	);
+	const draft = await service.saveTemplate(
+		{
+			brand: "UMEHA",
+			purpose: "CHECK_IN",
+			name: `${prefix}-template-wait-timestamps`,
+			body: "Chào {{customer}}",
+			requiredTags: [tag],
+			excludedTags: [],
+			validUntil: null,
+		},
+		manager,
+	);
+	await service.approveTemplate(draft.id, manager, true, draft.version);
+	await service.claim(task.id, actor, now);
+	const isolated = new CustomerCareService(db);
+	const original = (
+		Reflect.get(isolated, "lockTemplate") as (
+			tx: Prisma.TransactionClient,
+			id: string,
+		) => Promise<void>
+	).bind(isolated);
+	Reflect.set(
+		isolated,
+		"lockTemplate",
+		async (tx: Prisma.TransactionClient, id: string) => {
+			await original(tx, id);
+			await new Promise((resolve) => setTimeout(resolve, 150));
+		},
+	);
+	const copied = await isolated.copy(task.id, actor, now);
+	expect(
+		(
+			await db.careTask.findUniqueOrThrow({ where: { id: task.id } })
+		).copiedAt?.getTime(),
+	).toBeGreaterThanOrEqual(now.getTime() + 100);
+	const confirmed = await isolated.action(
+		{
+			id: task.id,
+			version: copied.version,
+			result: "SENT_MANUAL",
+			reason: "Synthetic test",
+		},
+		actor,
+		now,
+	);
+	expect(confirmed.confirmedAt?.getTime()).toBeGreaterThanOrEqual(
+		now.getTime() + 100,
+	);
+	expect(
+		(
+			await db.careCustomer.findUniqueOrThrow({
+				where: { id: task.customerId },
+			})
+		).lastTouchAt,
+	).toEqual(confirmed.confirmedAt);
+});
+
+test("manual confirmation rechecks an expired lease after waiting on a template", async () => {
+	const task = await enrolled("confirm-expired-lease");
+	const tag = "confirm-expired-lease";
+	await service.configureCustomer(
+		{ id: task.customerId, enrolled: true, ownerId: actor, tags: [tag] },
+		manager,
+	);
+	const draft = await service.saveTemplate(
+		{
+			brand: "UMEHA",
+			purpose: "CHECK_IN",
+			name: `${prefix}-confirm-expired-lease`,
+			body: "Chào {{customer}}",
+			requiredTags: [tag],
+			excludedTags: [],
+			validUntil: null,
+		},
+		manager,
+	);
+	await service.approveTemplate(draft.id, manager, true, draft.version);
+	await service.claim(task.id, actor, now);
+	const copied = await service.copy(task.id, actor, now);
+	await db.careTask.update({
+		where: { id: task.id },
+		data: { leaseUntil: new Date(now.getTime() + 100) },
+	});
+	const isolated = new CustomerCareService(db);
+	const original = (
+		Reflect.get(isolated, "lockTemplate") as (
+			tx: Prisma.TransactionClient,
+			id: string,
+		) => Promise<void>
+	).bind(isolated);
+	Reflect.set(
+		isolated,
+		"lockTemplate",
+		async (tx: Prisma.TransactionClient, id: string) => {
+			await original(tx, id);
+			await new Promise((resolve) => setTimeout(resolve, 250));
+		},
+	);
+	await expect(
+		isolated.action(
+			{
+				id: task.id,
+				version: copied.version,
+				result: "SENT_MANUAL",
+				reason: "Synthetic test",
+			},
+			actor,
+			now,
+		),
+	).rejects.toThrow("Cần nhận xử lý lại tác vụ");
+	const after = await db.careTask.findUniqueOrThrow({ where: { id: task.id } });
+	expect(after.state).toBe("COPIED");
+	expect(after.confirmedAt).toBeNull();
+	expect(
+		await db.careEvent.count({
+			where: { taskId: task.id, kind: "SENT_MANUAL" },
+		}),
+	).toBe(0);
+});
+
+test("copy rechecks an expired lease after waiting on a template", async () => {
+	const task = await enrolled("copy-expired-lease");
+	const tag = "copy-expired-lease";
+	await service.configureCustomer(
+		{ id: task.customerId, enrolled: true, ownerId: actor, tags: [tag] },
+		manager,
+	);
+	const draft = await service.saveTemplate(
+		{
+			brand: "UMEHA",
+			purpose: "CHECK_IN",
+			name: `${prefix}-copy-expired-lease`,
+			body: "Chào {{customer}}",
+			requiredTags: [tag],
+			excludedTags: [],
+			validUntil: null,
+		},
+		manager,
+	);
+	await service.approveTemplate(draft.id, manager, true, draft.version);
+	await service.claim(task.id, actor, now);
+	await db.careTask.update({
+		where: { id: task.id },
+		data: { leaseUntil: new Date(now.getTime() + 100) },
+	});
+	const isolated = new CustomerCareService(db);
+	const original = (
+		Reflect.get(isolated, "lockTemplate") as (
+			tx: Prisma.TransactionClient,
+			id: string,
+		) => Promise<void>
+	).bind(isolated);
+	Reflect.set(
+		isolated,
+		"lockTemplate",
+		async (tx: Prisma.TransactionClient, id: string) => {
+			await original(tx, id);
+			await new Promise((resolve) => setTimeout(resolve, 250));
+		},
+	);
+	await expect(isolated.copy(task.id, actor, now)).rejects.toThrow(
+		"Cần nhận xử lý lại tác vụ",
+	);
+	const after = await db.careTask.findUniqueOrThrow({ where: { id: task.id } });
+	expect(after.state).toBe("CLAIMED");
+	expect(after.snapshot).toBeNull();
+	expect(
+		await db.careEvent.count({
+			where: { taskId: task.id, kind: "COPY_PREPARED" },
+		}),
+	).toBe(0);
+});
+
+test("revocation waits for copy and a later manual-send confirmation is blocked", async () => {
+	const task = await enrolled("copy-first-race");
+	const tag = "copy-first-race";
+	await service.configureCustomer(
+		{ id: task.customerId, enrolled: true, ownerId: actor, tags: [tag] },
+		manager,
+	);
+	const draft = await service.saveTemplate(
+		{
+			brand: "UMEHA",
+			purpose: "CHECK_IN",
+			name: `${prefix}-copy-first-race`,
+			body: "Chào {{customer}}",
+			requiredTags: [tag],
+			excludedTags: [],
+			validUntil: null,
+		},
+		manager,
+	);
+	await service.approveTemplate(draft.id, manager, true, draft.version);
+	await service.claim(task.id, actor, now);
+	let releaseCopy = () => {};
+	let signalCopy = (_pid: number) => {};
+	let signalRevocation = (_pid: number) => {};
+	const release = new Promise<void>((resolve) => {
+		releaseCopy = resolve;
+	});
+	const copyPid = new Promise<number>((resolve) => {
+		signalCopy = resolve;
+	});
+	const revocationPid = new Promise<number>((resolve) => {
+		signalRevocation = resolve;
+	});
+	let copying: ReturnType<CustomerCareService["copy"]> | undefined;
+	let revocation: Promise<unknown> | undefined;
+	try {
+		const isolated = new CustomerCareService(db);
+		const original = (
+			Reflect.get(isolated, "lockTemplate") as (
+				tx: Prisma.TransactionClient,
+				id: string,
+			) => Promise<void>
+		).bind(isolated);
+		Reflect.set(
+			isolated,
+			"lockTemplate",
+			async (tx: Prisma.TransactionClient, id: string) => {
+				await original(tx, id);
+				const rows = await tx.$queryRaw<
+					{ pid: number }[]
+				>`SELECT pg_backend_pid() AS pid`;
+				if (!rows[0]) throw new Error("Missing copy backend PID");
+				signalCopy(rows[0].pid);
+				await release;
+			},
+		);
+		copying = isolated.copy(task.id, actor, now);
+		const blockerPid = await Promise.race([
+			copyPid,
+			copying.then(() => {
+				throw new Error("Copy ended before barrier");
+			}),
+		]);
+		revocation = db.$transaction(
+			async (tx) => {
+				const rows = await tx.$queryRaw<
+					{ pid: number }[]
+				>`SELECT pg_backend_pid() AS pid`;
+				if (!rows[0]) throw new Error("Missing revocation backend PID");
+				signalRevocation(rows[0].pid);
+				await tx.careTemplate.update({
+					where: { id: draft.id },
+					data: {
+						approvedAt: null,
+						approvedBy: null,
+						version: { increment: 1 },
+					},
+				});
+			},
+			{ timeout: 5000 },
+		);
+		const waiterPid = await Promise.race([
+			revocationPid,
+			revocation.then(() => {
+				throw new Error("Revocation ended before barrier");
+			}),
+		]);
+		await waitForDatabaseLock(waiterPid, blockerPid);
+		releaseCopy();
+		const copied = await copying;
+		await revocation;
+		expect(copied.text).toBeTruthy();
+		expect(
+			(await db.careTask.findUniqueOrThrow({ where: { id: task.id } }))
+				.snapshot,
+		).toBe(copied.text);
+		await expect(
+			service.action(
+				{
+					id: task.id,
+					version: copied.version,
+					result: "SENT_MANUAL",
+					reason: "Synthetic test",
+				},
+				actor,
+				now,
+			),
+		).rejects.toThrow("Mẫu đã thay đổi hoặc hết hiệu lực");
+		expect(
+			await db.careEvent.count({
+				where: { taskId: task.id, kind: "SENT_MANUAL" },
+			}),
+		).toBe(0);
+		await service.action(
+			{
+				id: task.id,
+				version: copied.version,
+				result: "UNCERTAIN",
+				reason: "Synthetic reconciliation",
+			},
+			actor,
+			now,
+		);
+		expect(
+			(
+				await db.careCustomer.findUniqueOrThrow({
+					where: { id: task.customerId },
+				})
+			).uncertain,
+		).toBe(true);
+	} finally {
+		releaseCopy();
+		if (copying) await copying.catch(() => {});
+		if (revocation) await revocation.catch(() => {});
+	}
+});
+
+describe("manual customer care", () => {
+	test("handoff of copied work after assignee removal preserves snapshot without recording a send", async () => {
+		const task = await enrolled("copy-former-assignee");
+		const tag = "copy-former-assignee";
+		await service.configureCustomer(
+			{ id: task.customerId, enrolled: true, ownerId: actor, tags: [tag] },
+			manager,
+		);
+		const template = await service.saveTemplate(
+			{
+				brand: "UMEHA",
+				purpose: "CHECK_IN",
+				name: `${prefix}-copy-owner`,
+				body: "Chào {{customer}}",
+				requiredTags: [tag],
+				excludedTags: [],
+				validUntil: null,
+			},
+			manager,
+		);
+		await service.approveTemplate(template.id, manager, true, template.version);
+		await service.claim(task.id, actor, now);
+		const copied = await service.copy(task.id, actor, now);
+		const beforeHandoff = await db.careTask.findUniqueOrThrow({
+			where: { id: task.id },
+		});
+		const customerBefore = await db.careCustomer.findUniqueOrThrow({
+			where: { id: task.customerId },
+		});
+		expect(beforeHandoff.snapshot).toBe(copied.text);
+		const membership = await db.member.findUniqueOrThrow({
+			where: {
+				organizationId_userId: { organizationId: "workspace", userId: actor },
+			},
+		});
+		try {
+			await db.member.delete({ where: { id: membership.id } });
+			await expect(service.claim(task.id, actor, now)).rejects.toThrow(
+				"Nhân viên không còn trong workspace",
+			);
+			await expect(service.copy(task.id, actor, now)).rejects.toThrow(
+				"Nhân viên không còn trong workspace",
+			);
+			await expect(
+				service.action(
+					{
+						id: task.id,
+						version: copied.version,
+						result: "SENT_MANUAL",
+						reason: "Synthetic test",
+					},
+					actor,
+					now,
+				),
+			).rejects.toThrow("Nhân viên không còn trong workspace");
+			await service.tick(now);
+			expect(
+				(await db.careTask.findUniqueOrThrow({ where: { id: task.id } })).state,
+			).toBe("COPIED");
+			await service.configureCustomer(
+				{ id: task.customerId, enrolled: true, ownerId: manager, tags: [tag] },
+				manager,
+			);
+			const handedOff = await db.careTask.findUniqueOrThrow({
+				where: { id: task.id },
+			});
+			expect(handedOff.snapshot).toBe(copied.text);
+			expect(handedOff.state).toBe("WAITING");
+			expect(handedOff.outcome).toBe("UNCERTAIN");
+			expect(
+				(
+					await db.careCustomer.findUniqueOrThrow({
+						where: { id: task.customerId },
+					})
+				).uncertain,
+			).toBe(true);
+			expect(
+				await db.careEvent.count({
+					where: {
+						taskId: task.id,
+						kind: { in: ["SENT_MANUAL", "RECONCILED_SENT"] },
+					},
+				}),
+			).toBe(0);
+			expect(
+				(
+					await db.careCustomer.findUniqueOrThrow({
+						where: { id: task.customerId },
+					})
+				).lastTouchAt,
+			).toEqual(customerBefore.lastTouchAt);
+		} finally {
+			await db.member.upsert({
+				where: { id: membership.id },
+				create: membership,
+				update: {},
+			});
+		}
+	});
+	test("a relevant tagged template outranks a newer generic template", async () => {
+		const task = await enrolled("specific-template");
+		await service.configureCustomer(
+			{ id: task.customerId, enrolled: true, ownerId: actor, tags: ["loyal"] },
+			manager,
+		);
+		try {
+			for (const [key, body, requiredTags] of [
+				["specific", "CHĂM SÓC NHÓM: {{customer}}", ["loyal"]],
+				["generic", "NỘI DUNG CHUNG: {{customer}}", []],
+			] as const) {
+				const template = await service.saveTemplate(
+					{
+						brand: "UMEHA",
+						purpose: "CHECK_IN",
+						name: `${prefix}-${key}`,
+						body,
+						requiredTags: [...requiredTags],
+						excludedTags: [],
+						validUntil: null,
+					},
+					manager,
+				);
+				await service.approveTemplate(
+					template.id,
+					manager,
+					true,
+					template.version,
+				);
+				await db.careTemplate.update({
+					where: { id: template.id },
+					data: {
+						updatedAt: new Date(
+							key === "generic"
+								? "2026-10-27T02:00:00Z"
+								: "2026-10-01T02:00:00Z",
+						),
+					},
+				});
+			}
+			await service.claim(task.id, actor, now);
+			expect((await service.copy(task.id, actor, now)).text).toStartWith(
+				"CHĂM SÓC NHÓM:",
+			);
+		} finally {
+			await db.careTemplate.updateMany({
+				where: { name: { in: [`${prefix}-specific`, `${prefix}-generic`] } },
+				data: { approvedAt: null, approvedBy: null },
+			});
+		}
+	});
+	test("response metrics distinguish checked history, latest confirmation and copy-only work", async () => {
+		const before = (await service.metrics(now)).activity;
+		for (const key of ["metrics-replied", "metrics-stale", "metrics-earlier"]) {
+			const input = fixture(key);
+			input.conversation.lastInboundAt =
+				key === "metrics-earlier"
+					? "2026-10-26T23:00:00Z"
+					: "2026-10-27T02:00:00Z";
+			input.conversation.activityVerifiedAt =
+				key === "metrics-stale" ? "2026-10-27T00:00:00Z" : fresh;
+			const imported = await service.importOrder(input, manager, now);
+			await db.careEvent.create({
+				data: {
+					customerId: imported.customerId,
+					actorId: actor,
+					kind: "SENT_MANUAL",
+					createdAt: new Date("2026-10-27T01:00:00Z"),
+				},
+			});
+			if (key === "metrics-earlier")
+				await db.careEvent.create({
+					data: {
+						customerId: imported.customerId,
+						actorId: actor,
+						kind: "SENT_MANUAL",
+						createdAt: new Date("2026-10-26T22:00:00Z"),
+					},
+				});
+		}
+		const copyOnly = await service.importOrder(
+			fixture("metrics-copy-only"),
+			manager,
+			now,
+		);
+		await db.careEvent.create({
+			data: {
+				customerId: copyOnly.customerId,
+				actorId: actor,
+				kind: "COPY_PREPARED",
+				createdAt: now,
+			},
+		});
+		const after = (await service.metrics(now)).activity;
+		const base = before.responses.find((r) => r.brand === "UMEHA");
+		const measured = after.responses.find((r) => r.brand === "UMEHA");
+		expect(measured?.confirmed).toBe((base?.confirmed ?? 0) + 3);
+		expect(measured?.checked).toBe((base?.checked ?? 0) + 2);
+		expect(measured?.replied).toBe((base?.replied ?? 0) + 1);
+		expect(after.outcomes.find((r) => r.kind === "SENT_MANUAL")?.count).toBe(
+			(before.outcomes.find((r) => r.kind === "SENT_MANUAL")?.count ?? 0) + 4,
+		);
+		expect(after.staff.find((r) => r.id === actor)?.prepared).toBe(
+			(before.staff.find((r) => r.id === actor)?.prepared ?? 0) + 1,
+		);
+		expect(after.responseDefinition).toBe(
+			"OBSERVED_INBOUND_AFTER_LATEST_MANUAL_CONFIRMATION",
+		);
+	});
+	test("source replay and restart do not duplicate tasks; SKU stays exact", async () => {
+		const task = await enrolled("replay");
+		await service.importOrder(fixture("replay"), manager, now);
+		await new CustomerCareService(db).tick(now);
+		expect(
+			await db.careTask.count({ where: { customerId: task.customerId } }),
+		).toBe(1);
+		const order = await db.careOrder.findUniqueOrThrow({
+			where: { id: task.orderId },
+		});
+		expect(JSON.stringify(order.products)).toContain(" V35  M ");
+	});
+	test("drafts cannot copy; copy never counts as sent; revoked template blocks confirmation", async () => {
+		const task = await enrolled("copy");
+		await service.claim(task.id, actor, now);
+		await expect(service.copy(task.id, actor, now)).rejects.toThrow();
+		const template = await service.saveTemplate(
+			{
+				brand: "UMEHA",
+				purpose: "CHECK_IN",
+				name: `${prefix}-check`,
+				body: "Chị {{customer}}, {{product}} mặc có thoải mái không ạ?",
+				requiredTags: [],
+				excludedTags: [],
+				validUntil: null,
+			},
+			manager,
+		);
+		await service.approveTemplate(template.id, manager, true, template.version);
+		const copy = await service.copy(task.id, actor, now);
+		expect(copy.text).toContain("Sản phẩm kiểm thử");
+		expect(
+			(await db.careTask.findUniqueOrThrow({ where: { id: task.id } }))
+				.confirmedAt,
+		).toBeNull();
+		expect(
+			(
+				await db.careCustomer.findUniqueOrThrow({
+					where: { id: task.customerId },
+				})
+			).lastTouchAt,
+		).toBeNull();
+		await service.approveTemplate(
+			template.id,
+			manager,
+			false,
+			template.version + 1,
+		);
+		await expect(
+			service.action(
+				{
+					id: task.id,
+					version: copy.version,
+					result: "SENT_MANUAL",
+					reason: "",
+				},
+				actor,
+				now,
+			),
+		).rejects.toThrow();
+	});
+	test("different staff cannot claim another owner's customer", async () => {
+		const task = await enrolled("owner");
+		await expect(service.claim(task.id, manager, now)).rejects.toThrow();
+	});
+	test("concurrent confirmations yield exactly one manual sent event", async () => {
+		const task = await enrolled("race");
+		const template = await service.saveTemplate(
+			{
+				brand: "UMEHA",
+				purpose: "CHECK_IN",
+				name: `${prefix}-race`,
+				body: "{{customer}} nhận hàng ổn chưa ạ?",
+				requiredTags: [],
+				excludedTags: [],
+				validUntil: null,
+			},
+			manager,
+		);
+		await service.approveTemplate(template.id, manager, true, template.version);
+		await service.claim(task.id, actor, now);
+		const copied = await service.copy(task.id, actor, now);
+		const results = await Promise.allSettled([
+			service.action(
+				{
+					id: task.id,
+					version: copied.version,
+					result: "SENT_MANUAL",
+					reason: "",
+				},
+				actor,
+				now,
+			),
+			service.action(
+				{
+					id: task.id,
+					version: copied.version,
+					result: "SENT_MANUAL",
+					reason: "",
+				},
+				actor,
+				now,
+			),
+		]);
+		expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+		expect(
+			await db.careEvent.count({
+				where: { taskId: task.id, kind: "SENT_MANUAL" },
+			}),
+		).toBe(1);
+	});
+	test("opt-out blocks a previously claimed task", async () => {
+		const task = await enrolled("optout");
+		const claimed = await service.claim(task.id, actor, now);
+		await service.action(
+			{
+				id: task.id,
+				version: claimed.version,
+				result: "OPT_OUT",
+				reason: "Khách yêu cầu",
+			},
+			actor,
+			now,
+		);
+		await expect(service.copy(task.id, actor, now)).rejects.toThrow();
+	});
+	test("stale updates cannot roll back delivery state", async () => {
+		const input = fixture("stale");
+		await service.importOrder(input, manager, now);
+		expect(
+			(
+				await service.importOrder(
+					{
+						...input,
+						orderStatus: "PENDING",
+						deliveredAt: null,
+						deliveryEvidence: null,
+						sourceUpdatedAt: "2026-10-21T00:00:00Z",
+					},
+					manager,
+					now,
+				)
+			).stale,
+		).toBe(true);
+	});
+	test("brands keep identical source customer IDs separate", async () => {
+		const a = await service.importOrder(
+			fixture("brand", "UMEHA"),
+			manager,
+			now,
+		);
+		const b = await service.importOrder(
+			fixture("brand", "LI_EN_SPORT"),
+			manager,
+			now,
+		);
+		expect(a.customerId).not.toBe(b.customerId);
+	});
+	test("new order invalidates old open task", async () => {
+		const task = await enrolled("new-order");
+		await service.importOrder(
+			{
+				...fixture("new-order"),
+				orderId: `${prefix}-new-pending`,
+				orderStatus: "PENDING",
+				deliveredAt: null,
+				deliveryEvidence: null,
+				sourceCreatedAt: "2026-10-27T02:00:00Z",
+			},
+			manager,
+			now,
+		);
+		await service.tick(now);
+		expect(
+			(await db.careTask.findUniqueOrThrow({ where: { id: task.id } })).state,
+		).toBe("CANCELLED");
+	});
+	test("copied unresolved content freezes rather than creating another touch", async () => {
+		const task = await enrolled("copied-new");
+		await service.claim(task.id, actor, now);
+		await service.copy(task.id, actor, now);
+		await service.importOrder(
+			{
+				...fixture("copied-new"),
+				orderId: `${prefix}-copied-new-pending`,
+				orderStatus: "PENDING",
+				deliveredAt: null,
+				deliveryEvidence: null,
+				sourceCreatedAt: "2026-10-27T02:00:00Z",
+			},
+			manager,
+			now,
+		);
+		await service.tick(now);
+		expect(
+			(await db.careTask.findUniqueOrThrow({ where: { id: task.id } })).outcome,
+		).toBe("UNCERTAIN");
+	});
+	test("member cannot approve templates or enroll customers", async () => {
+		await expect(
+			service.saveTemplate(
+				{
+					brand: "UMEHA",
+					purpose: "CHECK_IN",
+					name: "x",
+					body: "x",
+					requiredTags: [],
+					excludedTags: [],
+					validUntil: null,
+				},
+				actor,
+			),
+		).rejects.toThrow();
+	});
+
+	test("a first-sync customer reply cannot become a proactive reminder", async () => {
+		const input = fixture("first-inbound");
+		const imported = await service.importOrder(
+			{
+				...input,
+				conversation: {
+					...input.conversation,
+					lastInboundAt: "2026-10-26T10:00:00Z",
+					lastOutboundAt: "2026-10-26T09:00:00Z",
+				},
+			},
+			manager,
+			now,
+		);
+		await service.configureCustomer(
+			{ id: imported.customerId, enrolled: true, ownerId: actor, tags: [] },
+			manager,
+		);
+		await service.tick(now);
+		expect(
+			(
+				await db.careCustomer.findUniqueOrThrow({
+					where: { id: imported.customerId },
+				})
+			).replyPending,
+		).toBe(true);
+		expect(
+			await db.careTask.count({ where: { customerId: imported.customerId } }),
+		).toBe(0);
+	});
+
+	test("changed customer tags invalidate an already copied template", async () => {
+		const task = await enrolled("tag-change");
+		await service.configureCustomer(
+			{
+				id: task.customerId,
+				enrolled: true,
+				ownerId: actor,
+				tags: ["need:daily"],
+			},
+			manager,
+		);
+		const template = await service.saveTemplate(
+			{
+				brand: "UMEHA",
+				purpose: "CHECK_IN",
+				name: `${prefix}-tag-change`,
+				body: "TAG_RULE {{customer}}",
+				requiredTags: ["need:daily"],
+				excludedTags: ["not-fit"],
+				validUntil: null,
+			},
+			manager,
+		);
+		await service.approveTemplate(template.id, manager, true, template.version);
+		await service.claim(task.id, actor, now);
+		const copied = await service.copy(task.id, actor, now);
+		expect(copied.text).toContain("TAG_RULE");
+		await service.configureCustomer(
+			{
+				id: task.customerId,
+				enrolled: true,
+				ownerId: actor,
+				tags: ["need:daily", "not-fit"],
+			},
+			manager,
+		);
+		await expect(
+			service.action(
+				{
+					id: task.id,
+					version: copied.version,
+					result: "SENT_MANUAL",
+					reason: "",
+				},
+				actor,
+				now,
+			),
+		).rejects.toThrow();
+	});
+
+	test("manual copy remains available when the API refuses sending", async () => {
+		const task = await enrolled("manual-denied");
+		const input = fixture("manual-denied");
+		await service.importOrder(
+			{ ...input, conversation: { ...input.conversation, canSend: false } },
+			manager,
+			now,
+		);
+		const template = await service.saveTemplate(
+			{
+				brand: "UMEHA",
+				purpose: "CHECK_IN",
+				name: `${prefix}-manual-denied`,
+				body: "{{customer}} cần hỗ trợ gì ạ?",
+				requiredTags: [],
+				excludedTags: [],
+				validUntil: null,
+			},
+			manager,
+		);
+		await service.approveTemplate(template.id, manager, true, template.version);
+		await service.claim(task.id, actor, now);
+		expect((await service.copy(task.id, actor, now)).text).toBeTruthy();
+		expect(
+			(
+				await db.careConversation.findFirstOrThrow({
+					where: { customerId: task.customerId },
+				})
+			).canSend,
+		).toBe(false);
+		expect(
+			await db.careEvent.count({
+				where: { taskId: task.id, kind: "SENT_MANUAL" },
+			}),
+		).toBe(0);
+	});
+
+	test("a customer-requested date survives the original D+x milestone", async () => {
+		const task = await enrolled("promise");
+		const replied = await service.action(
+			{
+				id: task.id,
+				version: task.version,
+				result: "REPLIED",
+				reason: "Customer asked for a later date",
+			},
+			actor,
+			now,
+		);
+		const later = new Date("2027-03-01T02:00:00Z");
+		await service.action(
+			{
+				id: task.id,
+				version: replied.version,
+				result: "SNOOZE",
+				reason: "Customer requested this date",
+				until: later.toISOString(),
+			},
+			actor,
+			now,
+		);
+		await service.importOrder(
+			{
+				...fixture("promise"),
+				sourceUpdatedAt: later.toISOString(),
+				conversation: {
+					...fixture("promise").conversation,
+					verifiedAt: later.toISOString(),
+					activityVerifiedAt: later.toISOString(),
+				},
+			},
+			manager,
+			later,
+		);
+		await service.tick(later);
+		const promised = await db.careTask.findUniqueOrThrow({
+			where: { id: task.id },
+		});
+		expect(promised.state).toBe("OPEN");
+		expect(promised.outcome).toBe("PROMISED");
+		await expect(service.claim(task.id, actor, later)).resolves.toBeDefined();
+	});
+
+	test("uncertain sending needs an explicit disposition and records a conservative touch", async () => {
+		const task = await enrolled("uncertain");
+		const waiting = await service.action(
+			{
+				id: task.id,
+				version: task.version,
+				result: "UNCERTAIN",
+				reason: "Needs reconciliation",
+			},
+			actor,
+			now,
+		);
+		await expect(
+			service.action(
+				{
+					id: task.id,
+					version: waiting.version,
+					result: "RESOLVED",
+					reason: "Checked",
+				},
+				actor,
+				now,
+			),
+		).rejects.toThrow();
+		const resolved = await service.action(
+			{
+				id: task.id,
+				version: waiting.version,
+				result: "RESOLVED",
+				reason: "Staff checked platform history",
+				resolution: "SENT",
+			},
+			actor,
+			now,
+		);
+		expect(resolved.outcome).toBe("RECONCILED_SENT");
+		const customer = await db.careCustomer.findUniqueOrThrow({
+			where: { id: task.customerId },
+		});
+		expect(customer.uncertain).toBe(false);
+		expect(customer.lastTouchAt?.toISOString()).toBe(now.toISOString());
+	});
+	test("cohorts require maturity and exclude returned repeat orders", async () => {
+		const first = {
+			...fixture("cohort"),
+			orderId: `${prefix}-cohort-first`,
+			deliveredAt: "2026-07-01T04:00:00Z",
+			sourceCreatedAt: "2026-06-28T04:00:00Z",
+		};
+		await service.importOrder(first, manager, now);
+		await service.importOrder(
+			{
+				...first,
+				orderId: `${prefix}-cohort-repeat`,
+				deliveredAt: "2026-07-20T04:00:00Z",
+				sourceCreatedAt: "2026-07-17T04:00:00Z",
+			},
+			manager,
+			now,
+		);
+		const measured = await service.metrics(now);
+		expect(
+			measured.cohorts.find((c) => c.brand === "UMEHA" && c.days === 30)
+				?.repeat,
+		).toBeGreaterThan(0);
+		await service.importOrder(
+			{
+				...first,
+				orderId: `${prefix}-cohort-repeat`,
+				orderStatus: "RETURNED",
+				deliveredAt: null,
+				deliveryEvidence: null,
+				sourceCreatedAt: "2026-07-17T04:00:00Z",
+			},
+			manager,
+			now,
+		);
+		const after = await service.metrics(now);
+		expect(
+			after.cohorts.find((c) => c.brand === "UMEHA" && c.days === 30)?.repeat,
+		).toBe(
+			(measured.cohorts.find((c) => c.brand === "UMEHA" && c.days === 30)
+				?.repeat ?? 0) - 1,
+		);
+	});
+});

@@ -9,6 +9,8 @@
 	},
 	"scripts": {
 		"build": "bun build src/main.ts --target=bun --outdir dist --packages=external --sourcemap",
+		"care:worker": "bun ../../tools/customer-care/worker.ts",
+		"care:test": "CRM_TELEMETRY_DISABLED=1 bun test test/customer-care.integration.spec.ts ../../packages/validation/test/customer-care.spec.ts ../../tools/customer-care/source-sync.spec.ts",
 		"check-types": "tsc --noEmit",
 		"dev": "concurrently -n api,trpc -c blue,magenta \"bun --watch src/main.ts\" \"bun run dev:trpc\"",
 		"dev:trpc": "nestjs-trpc watch -e src/app.module.ts -r \"**/*.router.ts\" -o src/generated",
@@ -41,6 +43,7 @@
 		"cache-manager": "^7.2.9",
 		"class-transformer": "^0.5.1",
 		"class-validator": "^0.15.1",
+		"express": "5.2.1",
 		"helmet": "^8.3.0",
 		"nestjs-trpc": "^2.13.0",
 		"reflect-metadata": "^0.2.2",

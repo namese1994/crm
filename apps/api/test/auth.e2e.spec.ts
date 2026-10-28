@@ -65,6 +65,9 @@ describe("Auth (e2e)", () => {
 		);
 
 		expect(response.body.result.data).toEqual({
+			password:
+				process.env.CRM_CARE_MODE === "true" &&
+				process.env.CRM_CARE_PASSWORD_AUTH === "true",
 			google: true,
 			microsoft: microsoftConfigured,
 			providers: [],

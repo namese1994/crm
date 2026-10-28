@@ -1,0 +1,25 @@
+{
+	"name": "@crm/care-worker",
+	"version": "0.0.0",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"build": "bun build worker.ts --target=bun --outdir dist --packages=external",
+		"check-types": "tsc --noEmit",
+		"test": "bun test source-sync.spec.ts"
+	},
+	"dependencies": {
+		"@crm/auth": "workspace:*",
+		"@crm/db": "workspace:*",
+		"@crm/env": "workspace:*",
+		"@crm/validation": "workspace:*",
+		"@nestjs/common": "^11.0.1",
+		"reflect-metadata": "^0.2.2",
+		"zod": "^4.4.3"
+	},
+	"devDependencies": {
+		"@crm/typescript-config": "workspace:*",
+		"@types/bun": "^1.3.14",
+		"typescript": "^5.9.2"
+	}
+}

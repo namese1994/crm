@@ -11,6 +11,7 @@
 		"dev:headless": "eve dev --no-ui",
 		"dispatch": "curl -fsS -X POST \"${AGENT_URL:-http://127.0.0.1:2000}/eve/v1/dev/schedules/dispatch\"",
 		"build": "eve build",
+		"build:care": "bun build scripts/care-worker.ts --target=bun --outdir dist-care --packages=external",
 		"start": "bun scripts/start.ts",
 		"check-types": "tsc --noEmit",
 		"test": "CRM_TELEMETRY_DISABLED=1 bun test",
@@ -19,6 +20,7 @@
 		"clean": "rm -rf .turbo .eve node_modules"
 	},
 	"dependencies": {
+		"@ai-sdk/openai-compatible": "3.0.75",
 		"@crm/auth": "workspace:*",
 		"@crm/db": "workspace:*",
 		"@crm/env": "workspace:*",

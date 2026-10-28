@@ -46,6 +46,12 @@ Microsoft equivalent of `hd`**: `tenantId` is the whole of it.
 **Neither pair is required, but an install wants one of them or an SSO provider** —
 with none, the sign-in page says so by name rather than rendering nothing.
 
+Care workspaces can use pre-provisioned email/password accounts instead. Set both
+`CRM_CARE_MODE=true` and `CRM_CARE_PASSWORD_AUTH=true`. Password auth stays off by
+default and outside care mode. Public signup stays disabled. The allow-list also
+checks each new session in this mode. Use the operator command in
+`docs/customer-care/RUNBOOK.md`; no password appears in process arguments or Git.
+
 **`ALLOWED_SIGN_IN`** — comma-separated whole domains or single addresses (bare
 addresses exist for a solo self-hoster, where `gmail.com` would be an open door). **One
 list, read by the sign-in guard *and* the sync's "which side is external" decision** —

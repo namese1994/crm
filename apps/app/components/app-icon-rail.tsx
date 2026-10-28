@@ -41,6 +41,12 @@ type RailItem = {
 };
 
 const ITEMS: RailItem[] = [
+	{
+		title: "Chăm sóc khách",
+		href: "/care",
+		icon: UserMultiple,
+		match: "prefix",
+	},
 	{ title: "Overview", href: "/", icon: Dashboard, match: "exact" },
 	{
 		title: "Chat",

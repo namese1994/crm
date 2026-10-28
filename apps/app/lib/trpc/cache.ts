@@ -22,6 +22,7 @@ type RemovedRecord = { kind: RecordKind; id: string };
 type RemovedRecords = { kind: RecordKind; ids: string[] };
 
 export type CrmCache = {
+	care(): Promise<void>;
 	company(id?: string, options?: Options): Promise<void>;
 	contact(id?: string, options?: Options): Promise<void>;
 	deal(id?: string, options?: Options): Promise<void>;
@@ -126,6 +127,17 @@ export function useCrmCache(): CrmCache {
 	} as const;
 
 	return {
+		care: () =>
+			run(
+				[
+					trpc.care.list.pathKey(),
+					trpc.care.customers.pathKey(),
+					trpc.care.templates.pathKey(),
+					trpc.care.summary.pathKey(),
+					trpc.care.metrics.pathKey(),
+				],
+				[],
+			),
 		fields: (entity, options) =>
 			run(
 				[

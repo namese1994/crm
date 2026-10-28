@@ -29,6 +29,7 @@ export const signInAccounts = cache(async (userId: string) =>
 
 export async function requireMailboxAccess(): Promise<Session> {
 	const session = await requireSession();
+	if (process.env.CRM_CARE_MODE === "true") return session;
 
 	if (needsMailboxGrant(await signInAccounts(session.user.id))) {
 		redirect("/grant-access");

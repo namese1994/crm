@@ -13,6 +13,8 @@
 		"./builder-question": "./src/builder-question.ts",
 		"./builder-session-limit": "./src/builder-session-limit.ts",
 		"./company-import": "./src/company-import.ts",
+		"./customer-care": "./src/customer-care.ts",
+		"./care-integrations": "./src/care-integrations.ts",
 		"./enrichment-queue": "./src/enrichment-queue.ts",
 		"./eve-stream": "./src/eve-stream.ts",
 		"./eve-public-event": "./src/eve-public-event.ts",

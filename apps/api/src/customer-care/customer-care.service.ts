@@ -829,6 +829,7 @@ export class CustomerCareService {
 	}
 
 	async copy(id: string, actorId: string, now = new Date()) {
+		const started = performance.now();
 		const task = await this.db.careTask.findUnique({
 			where: { id },
 			select: { customerId: true },
@@ -859,15 +860,31 @@ export class CustomerCareService {
 				},
 				orderBy: [{ updatedAt: "desc" }, { id: "asc" }],
 			});
-			const template = this.pickTemplate(
+			const candidate = this.pickTemplate(
 				templates,
 				row.customer.tags,
 				sent.map((event) => event.templateId),
 			);
-			if (!template)
+			if (!candidate)
 				throw new ConflictException(
 					"Chưa có mẫu đã duyệt phù hợp hoặc mẫu đã dùng",
 				);
+			await this.lockTemplate(tx, candidate.id);
+			const template = await tx.careTemplate.findUnique({
+				where: { id: candidate.id },
+			});
+			const checkedAt = new Date(now.getTime() + performance.now() - started);
+			this.assertLease(row, actorId, checkedAt);
+			await this.assertEligible(tx, row, checkedAt);
+			if (
+				!template?.approvedAt ||
+				template.version !== candidate.version ||
+				template.brand !== row.customer.brand ||
+				template.purpose !== row.purpose ||
+				(template.validUntil && template.validUntil <= checkedAt) ||
+				!this.matchesTemplate(template, row.customer.tags)
+			)
+				throw new ConflictException("Mẫu đã thay đổi hoặc hết hiệu lực");
 			const products = careProducts.parse(row.order.products);
 			let snapshot: string;
 			try {
@@ -886,7 +903,7 @@ export class CustomerCareService {
 					templateId: template.id,
 					templateVersion: template.version,
 					snapshot,
-					copiedAt: now,
+					copiedAt: checkedAt,
 					version: { increment: 1 },
 				},
 			});
@@ -908,6 +925,7 @@ export class CustomerCareService {
 	}
 
 	async action(input: CareActionInput, actorId: string, now = new Date()) {
+		const started = performance.now();
 		const task = await this.db.careTask.findUnique({
 			where: { id: input.id },
 			select: { customerId: true },
@@ -936,6 +954,7 @@ export class CustomerCareService {
 					input.expectedInboundAt ?? null,
 				);
 			let state: "DONE" | "WAITING" = "DONE";
+			let confirmedAt: Date | null = null;
 			if (input.result === "SENT_MANUAL") {
 				this.assertLease(row, actorId, now);
 				await this.assertEligible(tx, row, now);
@@ -943,17 +962,24 @@ export class CustomerCareService {
 					throw new ConflictException(
 						"Cần chuẩn bị nội dung trước khi xác nhận",
 					);
+				await this.lockTemplate(tx, row.templateId);
 				const template = await tx.careTemplate.findUnique({
 					where: { id: row.templateId },
 				});
+				const checkedAt = new Date(now.getTime() + performance.now() - started);
+				this.assertLease(row, actorId, checkedAt);
+				await this.assertEligible(tx, row, checkedAt);
 				if (
 					!template?.approvedAt ||
 					template.version !== row.templateVersion ||
-					(template.validUntil && template.validUntil <= now) ||
+					template.brand !== row.customer.brand ||
+					template.purpose !== row.purpose ||
+					(template.validUntil && template.validUntil <= checkedAt) ||
 					!this.matchesTemplate(template, row.customer.tags)
 				)
 					throw new ConflictException("Mẫu đã thay đổi hoặc hết hiệu lực");
-				changes.lastTouchAt = now;
+				changes.lastTouchAt = checkedAt;
+				confirmedAt = checkedAt;
 				changes.unanswered = { increment: 1 };
 			} else if (input.result === "OPT_OUT") changes.optedOut = true;
 			else if (input.result === "ISSUE") {
@@ -1006,7 +1032,7 @@ export class CustomerCareService {
 						input.result === "SNOOZE" && input.until
 							? new Date(input.until)
 							: undefined,
-					confirmedAt: input.result === "SENT_MANUAL" ? now : null,
+					confirmedAt,
 					leaseUntil: null,
 					version: { increment: 1 },
 				},
@@ -1292,6 +1318,14 @@ export class CustomerCareService {
 			{ id: string }[]
 		>`SELECT id FROM "careCustomer" WHERE id = ${id} FOR UPDATE`;
 		if (!found.length) throw new NotFoundException("Không tìm thấy khách");
+	}
+
+	private async lockTemplate(tx: Tx, id: string) {
+		const rows = await tx.$queryRaw<
+			{ id: string }[]
+		>`SELECT id FROM "careTemplate" WHERE id = ${id} FOR SHARE`;
+		if (!rows.length)
+			throw new ConflictException("Mẫu đã thay đổi hoặc hết hiệu lực");
 	}
 
 	private async lockMembership(tx: Tx, userId: string) {

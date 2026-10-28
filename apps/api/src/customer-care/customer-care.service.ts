@@ -152,9 +152,25 @@ export class CustomerCareService {
 			}),
 			this.db.careCustomer.count({ where }),
 		]);
+		const assignees = await this.db.member.findMany({
+			where: {
+				organizationId: WORKSPACE_ID,
+				userId: {
+					in: [
+						...new Set(
+							rows.flatMap((row) => (row.ownerId ? [row.ownerId] : [])),
+						),
+					],
+				},
+			},
+			select: { userId: true },
+		});
+		const assigneeIds = new Set(assignees.map((member) => member.userId));
 		return {
 			rows: rows.map((customer) => ({
 				...customer,
+				ownerValid:
+					customer.ownerId !== null && assigneeIds.has(customer.ownerId),
 				latestInboundAt: this.latestInboundAt(customer),
 			})),
 			total,
@@ -670,6 +686,16 @@ export class CustomerCareService {
 					!current.ownerId
 				)
 					return 0;
+				const assignee = await tx.member.findUnique({
+					where: {
+						organizationId_userId: {
+							organizationId: WORKSPACE_ID,
+							userId: current.ownerId,
+						},
+					},
+					select: { id: true },
+				});
+				if (!assignee) return 0;
 				await tx.careTask.updateMany({
 					where: {
 						customerId: customer.id,

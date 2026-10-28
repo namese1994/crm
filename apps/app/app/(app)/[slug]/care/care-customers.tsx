@@ -394,9 +394,13 @@ function CustomerCard({
 						<Badge variant="outline">Cần đối soát việc đã copy</Badge>
 					)}
 				</div>
-				{customer.enrolled && !customer.ownerId && (
+				{customer.enrolled && !customer.ownerValid && (
 					<Alert>
-						<AlertTitle>Chưa có nhân viên phụ trách</AlertTitle>
+						<AlertTitle>
+							{customer.ownerId
+								? "Nhân viên phụ trách không còn trong workspace"
+								: "Chưa có nhân viên phụ trách"}
+						</AlertTitle>
 						<AlertDescription>
 							Khách đã vào pilot nhưng chưa thể tạo việc chăm sóc mới.{" "}
 							{canManage

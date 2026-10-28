@@ -82,6 +82,181 @@ test("an enrolled customer without an assignee gets no new task until assigned",
 	).toBe(1);
 });
 
+test("a removed assignee gets no new task until a current member is assigned", async () => {
+	const formerUser = `${prefix}-former-assignee`;
+	await db.user.create({
+		data: {
+			id: formerUser,
+			name: "Former test member",
+			email: `${formerUser}@example.invalid`,
+			updatedAt: now,
+		},
+	});
+	try {
+		await db.member.create({
+			data: {
+				id: crypto.randomUUID(),
+				organizationId: "workspace",
+				userId: formerUser,
+				role: "member",
+				createdAt: now,
+			},
+		});
+		const imported = await service.importOrder(
+			fixture("former-assignee"),
+			manager,
+			now,
+		);
+		await service.configureCustomer(
+			{
+				id: imported.customerId,
+				enrolled: true,
+				ownerId: formerUser,
+				tags: [],
+			},
+			manager,
+		);
+		await db.member.delete({
+			where: {
+				organizationId_userId: {
+					organizationId: "workspace",
+					userId: formerUser,
+				},
+			},
+		});
+		const beforeReassignment = await service.customers({
+			search: `${prefix}-former-assignee`,
+			page: 1,
+		});
+		expect(
+			beforeReassignment.rows.find(
+				(customer) => customer.id === imported.customerId,
+			)?.ownerValid,
+		).toBe(false);
+		await service.tick(now);
+		expect(
+			await db.careTask.count({ where: { customerId: imported.customerId } }),
+		).toBe(0);
+		await service.configureCustomer(
+			{ id: imported.customerId, enrolled: true, ownerId: actor, tags: [] },
+			manager,
+		);
+		await service.tick(now);
+		expect(
+			await db.careTask.count({ where: { customerId: imported.customerId } }),
+		).toBe(1);
+		const afterReassignment = await service.customers({
+			search: `${prefix}-former-assignee`,
+			page: 1,
+		});
+		expect(
+			afterReassignment.rows.find(
+				(customer) => customer.id === imported.customerId,
+			)?.ownerValid,
+		).toBe(true);
+		await db.member.create({
+			data: {
+				id: crypto.randomUUID(),
+				organizationId: "workspace",
+				userId: formerUser,
+				role: "member",
+				createdAt: now,
+			},
+		});
+		await service.configureCustomer(
+			{
+				id: imported.customerId,
+				enrolled: true,
+				ownerId: formerUser,
+				tags: [],
+			},
+			manager,
+		);
+		const task = await db.careTask.findFirstOrThrow({
+			where: { customerId: imported.customerId },
+		});
+		await db.careTask.update({
+			where: { id: task.id },
+			data: { state: "WAITING", outcome: "PROMISED", dueAt: now },
+		});
+		await db.member.delete({
+			where: {
+				organizationId_userId: {
+					organizationId: "workspace",
+					userId: formerUser,
+				},
+			},
+		});
+		await service.tick(now);
+		expect(
+			(await db.careTask.findUniqueOrThrow({ where: { id: task.id } })).state,
+		).toBe("WAITING");
+		await service.configureCustomer(
+			{ id: imported.customerId, enrolled: true, ownerId: actor, tags: [] },
+			manager,
+		);
+		await service.tick(now);
+		expect(
+			(await db.careTask.findUniqueOrThrow({ where: { id: task.id } })).state,
+		).toBe("OPEN");
+		await db.member.create({
+			data: {
+				id: crypto.randomUUID(),
+				organizationId: "workspace",
+				userId: formerUser,
+				role: "member",
+				createdAt: now,
+			},
+		});
+		await service.configureCustomer(
+			{
+				id: imported.customerId,
+				enrolled: true,
+				ownerId: formerUser,
+				tags: [],
+			},
+			manager,
+		);
+		await db.careTask.update({
+			where: { id: task.id },
+			data: { state: "COPIED", outcome: null },
+		});
+		await db.member.delete({
+			where: {
+				organizationId_userId: {
+					organizationId: "workspace",
+					userId: formerUser,
+				},
+			},
+		});
+		await service.tick(now);
+		expect(
+			(await db.careTask.findUniqueOrThrow({ where: { id: task.id } })).state,
+		).toBe("COPIED");
+		await service.configureCustomer(
+			{ id: imported.customerId, enrolled: true, ownerId: actor, tags: [] },
+			manager,
+		);
+		const copiedAfterHandoff = await db.careTask.findUniqueOrThrow({
+			where: { id: task.id },
+		});
+		expect(copiedAfterHandoff.state).toBe("WAITING");
+		expect(copiedAfterHandoff.outcome).toBe("UNCERTAIN");
+		expect(
+			(
+				await db.careCustomer.findUniqueOrThrow({
+					where: { id: imported.customerId },
+				})
+			).uncertain,
+		).toBe(true);
+	} finally {
+		await db.member.deleteMany({
+			where: { organizationId: "workspace", userId: formerUser },
+		});
+		await db.user.delete({ where: { id: formerUser } });
+	}
+});
+
 test("customer search and filters cover the whole result set with stable pagination", async () => {
 	const marker = `${prefix}-lookup`;
 	await db.careCustomer.createMany({
@@ -753,6 +928,86 @@ describe("care sync and reply recovery", () => {
 });
 
 describe("manual customer care", () => {
+	test("handoff of copied work after assignee removal preserves snapshot without recording a send", async () => {
+		const task = await enrolled("copy-former-assignee");
+		const tag = "copy-former-assignee";
+		await service.configureCustomer(
+			{ id: task.customerId, enrolled: true, ownerId: actor, tags: [tag] },
+			manager,
+		);
+		const template = await service.saveTemplate(
+			{
+				brand: "UMEHA",
+				purpose: "CHECK_IN",
+				name: `${prefix}-copy-owner`,
+				body: "Chào {{customer}}",
+				requiredTags: [tag],
+				excludedTags: [],
+				validUntil: null,
+			},
+			manager,
+		);
+		await service.approveTemplate(template.id, manager, true, template.version);
+		await service.claim(task.id, actor, now);
+		const copied = await service.copy(task.id, actor, now);
+		const beforeHandoff = await db.careTask.findUniqueOrThrow({
+			where: { id: task.id },
+		});
+		const customerBefore = await db.careCustomer.findUniqueOrThrow({
+			where: { id: task.customerId },
+		});
+		expect(beforeHandoff.snapshot).toBe(copied.text);
+		const membership = await db.member.findUniqueOrThrow({
+			where: {
+				organizationId_userId: { organizationId: "workspace", userId: actor },
+			},
+		});
+		try {
+			await db.member.delete({ where: { id: membership.id } });
+			await service.tick(now);
+			expect(
+				(await db.careTask.findUniqueOrThrow({ where: { id: task.id } })).state,
+			).toBe("COPIED");
+			await service.configureCustomer(
+				{ id: task.customerId, enrolled: true, ownerId: manager, tags: [tag] },
+				manager,
+			);
+			const handedOff = await db.careTask.findUniqueOrThrow({
+				where: { id: task.id },
+			});
+			expect(handedOff.snapshot).toBe(copied.text);
+			expect(handedOff.state).toBe("WAITING");
+			expect(handedOff.outcome).toBe("UNCERTAIN");
+			expect(
+				(
+					await db.careCustomer.findUniqueOrThrow({
+						where: { id: task.customerId },
+					})
+				).uncertain,
+			).toBe(true);
+			expect(
+				await db.careEvent.count({
+					where: {
+						taskId: task.id,
+						kind: { in: ["SENT_MANUAL", "RECONCILED_SENT"] },
+					},
+				}),
+			).toBe(0);
+			expect(
+				(
+					await db.careCustomer.findUniqueOrThrow({
+						where: { id: task.customerId },
+					})
+				).lastTouchAt,
+			).toEqual(customerBefore.lastTouchAt);
+		} finally {
+			await db.member.upsert({
+				where: { id: membership.id },
+				create: membership,
+				update: {},
+			});
+		}
+	});
 	test("a relevant tagged template outranks a newer generic template", async () => {
 		const task = await enrolled("specific-template");
 		await service.configureCustomer(

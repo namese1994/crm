@@ -661,6 +661,268 @@ test("customer assignment rejects a manager demoted to member", async () => {
 	}
 });
 
+test("a demoted manager cannot edit or approve a template", async () => {
+	const input = {
+		brand: "UMEHA" as const,
+		purpose: "CHECK_IN" as const,
+		name: `${prefix}-role-template`,
+		body: "Chào {{customer}}",
+		requiredTags: [],
+		excludedTags: [],
+		validUntil: null,
+	};
+	const template = await service.saveTemplate(input, manager);
+	const membership = await db.member.findUniqueOrThrow({
+		where: {
+			organizationId_userId: { organizationId: "workspace", userId: manager },
+		},
+	});
+	try {
+		await db.member.update({
+			where: { id: membership.id },
+			data: { role: "member" },
+		});
+		await expect(
+			service.saveTemplate(
+				{ ...input, id: template.id, body: "Changed" },
+				manager,
+			),
+		).rejects.toThrow("Chỉ quản lý được cấu hình chăm sóc");
+		await expect(
+			service.approveTemplate(template.id, manager, true, template.version),
+		).rejects.toThrow("Chỉ quản lý được cấu hình chăm sóc");
+		const after = await db.careTemplate.findUniqueOrThrow({
+			where: { id: template.id },
+		});
+		expect(after.body).toBe(template.body);
+		expect(after.version).toBe(template.version);
+		expect(after.approvedAt).toBeNull();
+	} finally {
+		await db.member.update({
+			where: { id: membership.id },
+			data: { role: membership.role },
+		});
+	}
+});
+
+test("template approval waiting for manager demotion is denied", async () => {
+	const template = await service.saveTemplate(
+		{
+			brand: "UMEHA",
+			purpose: "CHECK_IN",
+			name: `${prefix}-concurrent-template`,
+			body: "Chào {{customer}}",
+			requiredTags: [],
+			excludedTags: [],
+			validUntil: null,
+		},
+		manager,
+	);
+	const member = await db.member.findUniqueOrThrow({
+		where: {
+			organizationId_userId: { organizationId: "workspace", userId: manager },
+		},
+	});
+	let releaseDemotion = () => {};
+	let signalDemotion = (_pid: number) => {};
+	let signalApproval = (_pid: number) => {};
+	const release = new Promise<void>((resolve) => {
+		releaseDemotion = resolve;
+	});
+	const demotionPid = new Promise<number>((resolve) => {
+		signalDemotion = resolve;
+	});
+	const approvalPid = new Promise<number>((resolve) => {
+		signalApproval = resolve;
+	});
+	let demotion: Promise<unknown> | undefined;
+	let approval: Promise<{ allowed: boolean; error?: unknown }> | undefined;
+	try {
+		demotion = db.$transaction(
+			async (tx) => {
+				const rows = await tx.$queryRaw<
+					{ pid: number }[]
+				>`SELECT pg_backend_pid() AS pid`;
+				if (!rows[0]) throw new Error("Missing demotion backend PID");
+				await tx.member.update({
+					where: { id: member.id },
+					data: { role: "member" },
+				});
+				signalDemotion(rows[0].pid);
+				await release;
+			},
+			{ timeout: 5000 },
+		);
+		const blockerPid = await Promise.race([
+			demotionPid,
+			demotion.then(() => {
+				throw new Error("Demotion ended before barrier");
+			}),
+		]);
+		const isolated = new CustomerCareService(db);
+		const original = (
+			Reflect.get(isolated, "lockMembershipRole") as (
+				tx: Prisma.TransactionClient,
+				id: string,
+			) => Promise<unknown>
+		).bind(isolated);
+		Reflect.set(
+			isolated,
+			"lockMembershipRole",
+			async (tx: Prisma.TransactionClient, id: string) => {
+				const rows = await tx.$queryRaw<
+					{ pid: number }[]
+				>`SELECT pg_backend_pid() AS pid`;
+				if (!rows[0]) throw new Error("Missing approval backend PID");
+				signalApproval(rows[0].pid);
+				return original(tx, id);
+			},
+		);
+		approval = isolated
+			.approveTemplate(template.id, manager, true, template.version)
+			.then(
+				() => ({ allowed: true }),
+				(error: unknown) => ({ allowed: false, error }),
+			);
+		const waiterPid = await Promise.race([
+			approvalPid,
+			approval.then(() => {
+				throw new Error("Approval ended before barrier");
+			}),
+		]);
+		await waitForDatabaseLock(waiterPid, blockerPid);
+		releaseDemotion();
+		await demotion;
+		const result = await approval;
+		expect(result.allowed).toBe(false);
+		expect(result.error).toMatchObject({
+			status: 403,
+			message: "Chỉ quản lý được cấu hình chăm sóc",
+		});
+		const after = await db.careTemplate.findUniqueOrThrow({
+			where: { id: template.id },
+		});
+		expect(after.version).toBe(template.version);
+		expect(after.approvedAt).toBeNull();
+	} finally {
+		releaseDemotion();
+		if (demotion) await demotion.catch(() => {});
+		if (approval) await approval.catch(() => {});
+		await db.member.update({
+			where: { id: member.id },
+			data: { role: member.role },
+		});
+	}
+});
+
+test("manager demotion waits for an authorized template approval", async () => {
+	const template = await service.saveTemplate(
+		{
+			brand: "UMEHA",
+			purpose: "CHECK_IN",
+			name: `${prefix}-concurrent-approved`,
+			body: "Chào {{customer}}",
+			requiredTags: ["approval-isolated"],
+			excludedTags: [],
+			validUntil: null,
+		},
+		manager,
+	);
+	const member = await db.member.findUniqueOrThrow({
+		where: {
+			organizationId_userId: { organizationId: "workspace", userId: manager },
+		},
+	});
+	let releaseApproval = () => {};
+	let signalApproval = (_pid: number) => {};
+	let signalDemotion = (_pid: number) => {};
+	const release = new Promise<void>((resolve) => {
+		releaseApproval = resolve;
+	});
+	const approvalPid = new Promise<number>((resolve) => {
+		signalApproval = resolve;
+	});
+	const demotionPid = new Promise<number>((resolve) => {
+		signalDemotion = resolve;
+	});
+	let approval: ReturnType<CustomerCareService["approveTemplate"]> | undefined;
+	let demotion: Promise<unknown> | undefined;
+	try {
+		const isolated = new CustomerCareService(db);
+		const original = (
+			Reflect.get(isolated, "lockMembershipRole") as (
+				tx: Prisma.TransactionClient,
+				id: string,
+			) => Promise<unknown>
+		).bind(isolated);
+		Reflect.set(
+			isolated,
+			"lockMembershipRole",
+			async (tx: Prisma.TransactionClient, id: string) => {
+				const result = await original(tx, id);
+				if (id === manager) {
+					const rows = await tx.$queryRaw<
+						{ pid: number }[]
+					>`SELECT pg_backend_pid() AS pid`;
+					if (!rows[0]) throw new Error("Missing approval backend PID");
+					signalApproval(rows[0].pid);
+					await release;
+				}
+				return result;
+			},
+		);
+		approval = isolated.approveTemplate(
+			template.id,
+			manager,
+			true,
+			template.version,
+		);
+		const blockerPid = await Promise.race([
+			approvalPid,
+			approval.then(() => {
+				throw new Error("Approval ended before barrier");
+			}),
+		]);
+		demotion = db.$transaction(
+			async (tx) => {
+				const rows = await tx.$queryRaw<
+					{ pid: number }[]
+				>`SELECT pg_backend_pid() AS pid`;
+				if (!rows[0]) throw new Error("Missing demotion backend PID");
+				signalDemotion(rows[0].pid);
+				await tx.member.update({
+					where: { id: member.id },
+					data: { role: "member" },
+				});
+			},
+			{ timeout: 5000 },
+		);
+		const waiterPid = await Promise.race([
+			demotionPid,
+			demotion.then(() => {
+				throw new Error("Demotion ended before barrier");
+			}),
+		]);
+		await waitForDatabaseLock(waiterPid, blockerPid);
+		releaseApproval();
+		const approved = await approval;
+		expect(approved.approvedAt).not.toBeNull();
+		expect(approved.version).toBe(template.version + 1);
+		await demotion;
+		await expect(
+			service.approveTemplate(template.id, manager, false, approved.version),
+		).rejects.toThrow("Chỉ quản lý được cấu hình chăm sóc");
+	} finally {
+		releaseApproval();
+		if (approval) await approval.catch(() => {});
+		if (demotion) await demotion.catch(() => {});
+		await db.member.update({
+			where: { id: member.id },
+			data: { role: member.role },
+		});
+	}
+});
+
 test("a manager can assign themselves, clear assignment, and cannot assign a missing member", async () => {
 	const imported = await service.importOrder(
 		fixture("assignment-owner-edges"),

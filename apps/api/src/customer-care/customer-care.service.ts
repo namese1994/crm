@@ -1051,12 +1051,15 @@ export class CustomerCareService {
 			approvedAt: null,
 			approvedBy: null,
 		};
-		return id
-			? this.db.careTemplate.update({
-					where: { id },
-					data: { ...values, version: { increment: 1 } },
-				})
-			: this.db.careTemplate.create({ data: values });
+		return this.db.$transaction(async (tx) => {
+			await this.requireLockedManager(tx, actorId);
+			return id
+				? tx.careTemplate.update({
+						where: { id },
+						data: { ...values, version: { increment: 1 } },
+					})
+				: tx.careTemplate.create({ data: values });
+		});
 	}
 
 	async approveTemplate(
@@ -1067,6 +1070,7 @@ export class CustomerCareService {
 	) {
 		await this.requireManager(actorId);
 		return this.db.$transaction(async (tx) => {
+			await this.requireLockedManager(tx, actorId);
 			const changed = await tx.careTemplate.updateMany({
 				where: { id, version },
 				data: {
@@ -1302,6 +1306,11 @@ export class CustomerCareService {
 			{ role: string }[]
 		>`SELECT role FROM "member" WHERE "organizationId" = ${WORKSPACE_ID} AND "userId" = ${userId} FOR SHARE`;
 		return rows[0] ? toWorkspaceRole(rows[0].role) : null;
+	}
+
+	private async requireLockedManager(tx: Tx, userId: string) {
+		if (!isWorkspaceAdmin(await this.lockMembershipRole(tx, userId)))
+			throw new ForbiddenException("Chỉ quản lý được cấu hình chăm sóc");
 	}
 
 	private async requireCurrentMember(tx: Tx, userId: string) {

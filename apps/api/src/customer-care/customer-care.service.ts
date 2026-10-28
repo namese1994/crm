@@ -388,20 +388,10 @@ export class CustomerCareService {
 		actorId: string,
 	) {
 		await this.requireManager(actorId);
-		if (
-			input.ownerId &&
-			!(await this.db.member.findUnique({
-				where: {
-					organizationId_userId: {
-						organizationId: WORKSPACE_ID,
-						userId: input.ownerId,
-					},
-				},
-			}))
-		)
-			throw new BadRequestException("Nhân viên không thuộc workspace");
 		return this.db.$transaction(async (tx) => {
 			await this.lock(tx, input.id);
+			if (input.ownerId && !(await this.lockMembership(tx, input.ownerId)))
+				throw new BadRequestException("Nhân viên không thuộc workspace");
 			const previous = await tx.careCustomer.findUniqueOrThrow({
 				where: { id: input.id },
 			});
@@ -686,16 +676,7 @@ export class CustomerCareService {
 					!current.ownerId
 				)
 					return 0;
-				const assignee = await tx.member.findUnique({
-					where: {
-						organizationId_userId: {
-							organizationId: WORKSPACE_ID,
-							userId: current.ownerId,
-						},
-					},
-					select: { id: true },
-				});
-				if (!assignee) return 0;
+				if (!(await this.lockMembership(tx, current.ownerId))) return 0;
 				await tx.careTask.updateMany({
 					where: {
 						customerId: customer.id,
@@ -789,6 +770,7 @@ export class CustomerCareService {
 		if (!task) throw new NotFoundException("Không tìm thấy việc chăm sóc");
 		return this.db.$transaction(async (tx) => {
 			await this.lock(tx, task.customerId);
+			await this.requireCurrentMember(tx, actorId);
 			const row = await tx.careTask.findUniqueOrThrow({
 				where: { id },
 				include: { customer: { include: customerContext }, order: true },
@@ -840,6 +822,7 @@ export class CustomerCareService {
 		if (!task) throw new NotFoundException("Không tìm thấy việc chăm sóc");
 		return this.db.$transaction(async (tx) => {
 			await this.lock(tx, task.customerId);
+			await this.requireCurrentMember(tx, actorId);
 			const row = await tx.careTask.findUniqueOrThrow({
 				where: { id },
 				include: { customer: { include: customerContext }, order: true },
@@ -918,6 +901,7 @@ export class CustomerCareService {
 		if (!task) throw new NotFoundException("Không tìm thấy việc chăm sóc");
 		return this.db.$transaction(async (tx) => {
 			await this.lock(tx, task.customerId);
+			await this.requireCurrentMember(tx, actorId);
 			const row = await tx.careTask.findUniqueOrThrow({
 				where: { id: input.id },
 				include: { customer: { include: customerContext }, order: true },
@@ -1290,6 +1274,18 @@ export class CustomerCareService {
 			{ id: string }[]
 		>`SELECT id FROM "careCustomer" WHERE id = ${id} FOR UPDATE`;
 		if (!found.length) throw new NotFoundException("Không tìm thấy khách");
+	}
+
+	private async lockMembership(tx: Tx, userId: string) {
+		const rows = await tx.$queryRaw<
+			{ id: string }[]
+		>`SELECT id FROM "member" WHERE "organizationId" = ${WORKSPACE_ID} AND "userId" = ${userId} FOR KEY SHARE`;
+		return rows.length > 0;
+	}
+
+	private async requireCurrentMember(tx: Tx, userId: string) {
+		if (!(await this.lockMembership(tx, userId)))
+			throw new ForbiddenException("Nhân viên không còn trong workspace");
 	}
 
 	private async suspendPrepared(tx: Tx, customerId: string) {

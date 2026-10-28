@@ -1,6 +1,6 @@
 import "reflect-metadata";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { db } from "@crm/db";
+import { db, type Prisma } from "@crm/db";
 import type { CareImport } from "@crm/validation/customer-care";
 import type { MiddlewareOptions } from "nestjs-trpc";
 import { CareMembershipMiddleware } from "../src/customer-care/care-membership.middleware";
@@ -12,6 +12,17 @@ const actor = `${prefix}-staff`;
 const manager = `${prefix}-manager`;
 const now = new Date("2026-10-27T03:00:00Z");
 const fresh = now.toISOString();
+async function waitForDatabaseLock(pid: number, blockerPid: number) {
+	const deadline = Date.now() + 2500;
+	while (Date.now() < deadline) {
+		const rows = await db.$queryRaw<
+			{ blocked: boolean }[]
+		>`SELECT ${blockerPid} = ANY(pg_blocking_pids(${pid})) AS blocked`;
+		if (rows[0]?.blocked) return;
+		await new Promise((resolve) => setTimeout(resolve, 25));
+	}
+	throw new Error("Expected database lock wait was not observed");
+}
 const fixture = (
 	key: string,
 	brand: "UMEHA" | "LI_EN_SPORT" = "UMEHA",
@@ -254,6 +265,244 @@ test("a removed assignee gets no new task until a current member is assigned", a
 			where: { organizationId: "workspace", userId: formerUser },
 		});
 		await db.user.delete({ where: { id: formerUser } });
+	}
+});
+
+test("a claim waiting for a committed membership deletion is rejected", async () => {
+	const userId = `${prefix}-concurrent-revoke`;
+	await db.user.create({
+		data: {
+			id: userId,
+			name: "Test",
+			email: `${userId}@example.invalid`,
+			updatedAt: now,
+		},
+	});
+	let releaseDeletion = () => {};
+	let signalDeleted = () => {};
+	let signalClaimPid = (_pid: number) => {};
+	let signalDeletePid = (_pid: number) => {};
+	const release = new Promise<void>((resolve) => {
+		releaseDeletion = resolve;
+	});
+	const deleted = new Promise<void>((resolve) => {
+		signalDeleted = resolve;
+	});
+	const claimPid = new Promise<number>((resolve) => {
+		signalClaimPid = resolve;
+	});
+	const deletePid = new Promise<number>((resolve) => {
+		signalDeletePid = resolve;
+	});
+	let deleteTransaction: Promise<unknown> | undefined;
+	let claim: Promise<{ allowed: boolean; error?: unknown }> | undefined;
+	try {
+		await db.member.create({
+			data: {
+				id: crypto.randomUUID(),
+				organizationId: "workspace",
+				userId,
+				role: "member",
+				createdAt: now,
+			},
+		});
+		const imported = await service.importOrder(
+			fixture("concurrent-revoke"),
+			manager,
+			now,
+		);
+		await service.configureCustomer(
+			{ id: imported.customerId, enrolled: true, ownerId: userId, tags: [] },
+			manager,
+		);
+		await service.tick(now);
+		const task = await db.careTask.findFirstOrThrow({
+			where: { customerId: imported.customerId },
+		});
+		deleteTransaction = db.$transaction(
+			async (tx) => {
+				const rows = await tx.$queryRaw<
+					{ pid: number }[]
+				>`SELECT pg_backend_pid() AS pid`;
+				if (!rows[0]) throw new Error("Missing delete backend PID");
+				signalDeletePid(rows[0].pid);
+				await tx.member.delete({
+					where: {
+						organizationId_userId: { organizationId: "workspace", userId },
+					},
+				});
+				signalDeleted();
+				await release;
+			},
+			{ timeout: 5000 },
+		);
+		await Promise.race([
+			deleted,
+			deleteTransaction.then(() => {
+				throw new Error("Deletion ended before barrier");
+			}),
+		]);
+		const isolated = new CustomerCareService(db);
+		const original = (
+			Reflect.get(isolated, "lockMembership") as (
+				tx: Prisma.TransactionClient,
+				id: string,
+			) => Promise<boolean>
+		).bind(isolated);
+		Reflect.set(
+			isolated,
+			"lockMembership",
+			async (tx: Prisma.TransactionClient, id: string) => {
+				const rows = await tx.$queryRaw<
+					{ pid: number }[]
+				>`SELECT pg_backend_pid() AS pid`;
+				if (!rows[0]) throw new Error("Missing claim backend PID");
+				signalClaimPid(rows[0].pid);
+				return original(tx, id);
+			},
+		);
+		claim = isolated.claim(task.id, userId, now).then(
+			() => ({ allowed: true }),
+			(error: unknown) => ({ allowed: false, error }),
+		);
+		const pid = await Promise.race([
+			claimPid,
+			claim.then(() => {
+				throw new Error("Claim ended before lock query");
+			}),
+		]);
+		await waitForDatabaseLock(pid, await deletePid);
+		releaseDeletion();
+		await deleteTransaction;
+		const outcome = await claim;
+		expect(outcome.allowed).toBe(false);
+		expect(outcome.error).toMatchObject({
+			status: 403,
+			message: "Nhân viên không còn trong workspace",
+		});
+		expect(
+			await db.careEvent.count({ where: { taskId: task.id, kind: "CLAIMED" } }),
+		).toBe(0);
+	} finally {
+		releaseDeletion();
+		if (deleteTransaction) await deleteTransaction.catch(() => {});
+		if (claim) await claim.catch(() => {});
+		await db.member.deleteMany({
+			where: { organizationId: "workspace", userId },
+		});
+		await db.user.delete({ where: { id: userId } });
+	}
+});
+
+test("membership deletion waits for an already authorized claim to commit", async () => {
+	const userId = `${prefix}-concurrent-claim`;
+	await db.user.create({
+		data: {
+			id: userId,
+			name: "Test",
+			email: `${userId}@example.invalid`,
+			updatedAt: now,
+		},
+	});
+	let releaseClaim = () => {};
+	let signalLocked = (_pid: number) => {};
+	let signalDeletePid = (_pid: number) => {};
+	const release = new Promise<void>((resolve) => {
+		releaseClaim = resolve;
+	});
+	const locked = new Promise<number>((resolve) => {
+		signalLocked = resolve;
+	});
+	const deletePid = new Promise<number>((resolve) => {
+		signalDeletePid = resolve;
+	});
+	let deletion: Promise<unknown> | undefined;
+	let claim: ReturnType<CustomerCareService["claim"]> | undefined;
+	try {
+		await db.member.create({
+			data: {
+				id: crypto.randomUUID(),
+				organizationId: "workspace",
+				userId,
+				role: "member",
+				createdAt: now,
+			},
+		});
+		const imported = await service.importOrder(
+			fixture("concurrent-claim"),
+			manager,
+			now,
+		);
+		await service.configureCustomer(
+			{ id: imported.customerId, enrolled: true, ownerId: userId, tags: [] },
+			manager,
+		);
+		await service.tick(now);
+		const task = await db.careTask.findFirstOrThrow({
+			where: { customerId: imported.customerId },
+		});
+		const isolated = new CustomerCareService(db);
+		const original = (
+			Reflect.get(isolated, "lockMembership") as (
+				tx: unknown,
+				id: string,
+			) => Promise<boolean>
+		).bind(isolated);
+		Reflect.set(isolated, "lockMembership", async (tx: unknown, id: string) => {
+			const result = await original(tx, id);
+			if (id === userId) {
+				const rows = await (tx as Prisma.TransactionClient).$queryRaw<
+					{ pid: number }[]
+				>`SELECT pg_backend_pid() AS pid`;
+				if (!rows[0]) throw new Error("Missing claim backend PID");
+				signalLocked(rows[0].pid);
+				await release;
+			}
+			return result;
+		});
+		claim = isolated.claim(task.id, userId, now);
+		const blockerPid = await Promise.race([
+			locked,
+			claim.then(() => {
+				throw new Error("Claim ended before barrier");
+			}),
+		]);
+		deletion = db.$transaction(
+			async (tx) => {
+				const rows = await tx.$queryRaw<
+					{ pid: number }[]
+				>`SELECT pg_backend_pid() AS pid`;
+				if (!rows[0]) throw new Error("Missing delete backend PID");
+				signalDeletePid(rows[0].pid);
+				await tx.member.delete({
+					where: {
+						organizationId_userId: { organizationId: "workspace", userId },
+					},
+				});
+			},
+			{ timeout: 5000 },
+		);
+		const pid = await Promise.race([
+			deletePid,
+			deletion.then(() => {
+				throw new Error("Deletion ended before lock query");
+			}),
+		]);
+		await waitForDatabaseLock(pid, blockerPid);
+		releaseClaim();
+		expect((await claim).state).toBe("CLAIMED");
+		await deletion;
+		expect(
+			await db.careEvent.count({ where: { taskId: task.id, kind: "CLAIMED" } }),
+		).toBe(1);
+	} finally {
+		releaseClaim();
+		if (claim) await claim.catch(() => {});
+		if (deletion) await deletion.catch(() => {});
+		await db.member.deleteMany({
+			where: { organizationId: "workspace", userId },
+		});
+		await db.user.delete({ where: { id: userId } });
 	}
 });
 
@@ -964,6 +1213,24 @@ describe("manual customer care", () => {
 		});
 		try {
 			await db.member.delete({ where: { id: membership.id } });
+			await expect(service.claim(task.id, actor, now)).rejects.toThrow(
+				"Nhân viên không còn trong workspace",
+			);
+			await expect(service.copy(task.id, actor, now)).rejects.toThrow(
+				"Nhân viên không còn trong workspace",
+			);
+			await expect(
+				service.action(
+					{
+						id: task.id,
+						version: copied.version,
+						result: "SENT_MANUAL",
+						reason: "Synthetic test",
+					},
+					actor,
+					now,
+				),
+			).rejects.toThrow("Nhân viên không còn trong workspace");
 			await service.tick(now);
 			expect(
 				(await db.careTask.findUniqueOrThrow({ where: { id: task.id } })).state,
